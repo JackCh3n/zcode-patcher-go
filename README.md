@@ -26,7 +26,7 @@
 要求：[Python](https://www.python.org/) ≥ 3.10（脚本只用标准库，无需安装任何依赖）。
 
 ```bash
-git clone https://github.com/<your-name>/zcode-patcher.git
+git clone https://github.com/linguo2625469/zcode-patcher.git
 cd zcode-patcher
 
 # 只读检查（可放心先跑）
