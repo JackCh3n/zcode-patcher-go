@@ -9,6 +9,8 @@
 
 > **非官方项目**，与 ZCode（智谱）官方无任何关联。本仓库不包含 ZCode 的任何代码或资源，所有改动均在本地对已安装的客户端打补丁，随时可还原。
 
+> **来源说明**：本项目是两份社区作品的**整合与优化**，不是从零原创——初版 `zcode-patcher`（思考等级补丁 / TPS 状态栏 / Skill 框架）来自 [linux.do · lanvv 的分享帖](https://linux.do/t/topic/2886711)，模型拉取按钮来自 [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)。详见文末 [致谢与来源](#致谢与来源)。
+
 ---
 
 ## 功能一览
@@ -114,10 +116,23 @@ scripts/zcode-model-puller.js   # 模型拉取按钮注入脚本（含 preload/m
 
 把整个目录放进 `~/.zcode/skills/zcode-patcher/`，ZCode 的 AI 会按 `SKILL.md` 的流程代执行（含只读核实、备份确认、还原命令展示等安全步骤）。
 
-## 致谢
+## 致谢与来源
 
-- [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)（MIT）— 模型拉取按钮的前端脚本与原始思路。本仓库在其基础上做了：跨平台探测、纯 Python 重打包（保留 unpacked 原生模块）、语义锚点、自动创建供应商、元数据感知模板等改造
-- 其余代码为原创
+本项目为两份社区作品的**整合与优化**，基础代码与思路均来自社区：
+
+- **[linux.do · 这样的 zcode 太酷辣！（加个状态栏）](https://linux.do/t/topic/2886711)** — 作者 **lanvv**（2026-09-10）。本项目最初版本的来源：思考等级透传补丁、TPS 状态栏前端脚本（`scripts/zcode-tps.js`）、以及 Skill 的整体框架与流程设计。原帖明确 "可以直接借鉴定制你自己的状态"。
+- **[HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)**（MIT License, (c) HHQ-666）— 模型拉取按钮的前端脚本（`scripts/zcode-model-puller.js`，文件头保留原授权署名）与整体思路。
+
+我们在两者基础上做的整合与优化：
+
+| 方向 | 具体改造 |
+|---|---|
+| 打包内核 | 统一为纯 Python 实现：解析/重打包 asar 不依赖 Node，保留 unpacked 原生模块，重算 SHA256 integrity，写临时文件回读校验后原子替换 |
+| 跨平台 | Windows / macOS / Linux 安装位置自动探测（原版分别写死 Windows 路径或 macOS `.app`） |
+| 跨版本 | 内核锚点多版本匹配 + `--extract` 按结构特征自动提取；注入锚点改用语义字符串配正则捕获压缩别名，版本升级不失效 |
+| 可靠性 | 全外科手术式还原（不依赖整包备份、多补丁共存互不误伤）、幂等、`--check` 可查、脚本热更新 |
+| 模型拉取 | 自动创建供应商（破解客户端"先有模型才能存供应商"死锁）、API 协议判定、元数据感知模板（真实上下文 / 输出上限 / 思考档位）、React 表单兼容修复 |
+| 新增 | CLI 版 `model_pull.py`（`--all/--provider/--dry-run/--refresh/--test`）、思考等级与网关的档位联动（原名透传、off 语义） |
 
 ## 免责声明
 

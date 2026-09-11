@@ -191,6 +191,8 @@ python zcode_patcher.py --usage-chart --revert   # 从 sidecar 还原全部原�
 
 ## 三、打开状态栏：TPS 统计胶囊
 
+> 本能力与思考等级补丁源自 [linux.do 帖子 2886711](https://linux.do/t/topic/2886711)（作者 lanvv）分享的 `zcode-patcher.zip`（原帖授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
+
 输入框工具栏常驻一枚统计胶囊（水平居中于工具栏行，宽度上限 50%），展示**当前会话最近一轮**的生成指标：
 
 ```
