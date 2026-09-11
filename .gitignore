@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 补丁运行时产物（备份 / 逐字节记录 / 临时文件）——这些只属于本机，禁止入库
+*.bak
+*.tps.bak
+*.puller.bak
+*.original.bak
+*-patch.json
+*.chart-patch.json
+*.tps-patch.json
+*.puller-patch.json
+*.tps-tmp
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
