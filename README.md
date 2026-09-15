@@ -89,6 +89,21 @@ ZCode 的档位选择器对"非内核白名单"的自定义模型能选中档位
 
 **3）验证**：以供应商后台的请求日志为准（本地 rollout 日志脱敏，`thinking` 字段会被剥掉）。
 
+## 工具：探测真实输出上限
+
+网关 `/v1/models` 里的 `max_output_tokens` 常与实际能力不符，且上游可能**静默钳制**（请求超限不报错，内部截断）。本工具用「强制长输出 + 阶梯上探」实测出真实上限，判据严格区分两种停止：`finish=length` 小于请求值 = 被截断（可信）；`finish=stop` = 模型自己收尾（不可作判据，会重试）。
+
+```bash
+# 测某网关所有 cn: 开头的模型（并行 4，单模型 10 分钟预算）
+python scripts/probe_max_tokens.py --base http://host:7863/v1 --key sk-xxx --prefix cn: --jobs 4
+
+python scripts/probe_max_tokens.py ... --models cn:glm-5.3   # 只测指定模型
+python scripts/probe_max_tokens.py ... --dry-run --limit 3   # 先看计划
+python scripts/probe_max_tokens.py ... --resume              # 断点续测（跳过已测）
+```
+
+输出 JSONL + 汇总表（声称 vs 实测 + 差异告警）。实测样例：某网关 16 个模型中 **8 个静默钳制**，差异最大的是 `kimi-k3-1` 声称 1048576 实际 32000、`deepseek-v4.1-flash` 声称 393216 实际 32000。
+
 ## 平台支持
 
 | 平台 | 支持 | 备注 |
@@ -115,6 +130,7 @@ scripts/model_pull.py           # CLI：拉取模型、按服务器元数据刷�
 scripts/zcode-tps.js            # TPS 状态栏注入脚本
 scripts/zcode-model-puller.js   # 模型拉取按钮注入脚本（含 preload/main 注入的配套设计）
 scripts/tap_proxy.py            # 请求捕获代理：打印 ZCode 真实发出的请求体（验证思考档位等参数是否生效）
+scripts/probe_max_tokens.py     # 探测模型真实输出上限（识别网关"静默钳制"：声称值 vs 实测值）
 ```
 
 ## 作为 ZCode Skill 使用
