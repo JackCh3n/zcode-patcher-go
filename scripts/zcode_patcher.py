@@ -597,6 +597,47 @@ def _puller_preload_injection(electron_alias: str) -> bytes:
     ).encode()
 
 
+def _puller_preload_state(blob: bytes | None):
+    """解析 preload 注入状态：(injected, synced, clean, alias)。
+    synced=当前注入段与现行生成器逐字节一致（marker 存在但内容旧时为 False）；
+    clean=剥离注入后的原始内容（无法安全剥离时为 None，调用方应拒绝改写）。"""
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_PRELOAD_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    if PULLER_MARKER not in blob:
+        return False, False, blob, alias
+    m = PULLER_PRELOAD_STRIP.search(blob)
+    if m is None:
+        return True, False, None, alias          # 有注入但形态不符，无法安全剥离
+    stripped = blob[:m.start()] + blob[m.end():]
+    if m.group(0) == _puller_preload_injection(alias):
+        return True, True, stripped, alias
+    return True, False, stripped, alias
+
+
+def _puller_main_state(blob: bytes | None):
+    """解析 main 注入状态：注入段 = [首条 handler 起点, SaveMcpToUserDirectory 锚点起点)。
+    返回 (injected, synced, clean, alias)；clean 恒为剥离注入后的内容（未注入时即 blob）。"""
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_MAIN_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    if PULLER_MARKER not in blob:
+        return False, False, blob, alias
+    m = PULLER_MAIN_STRIP.search(blob)
+    if m is None or m.start() >= a.start():
+        return True, False, None, alias
+    stripped = blob[:m.start()] + blob[a.start():]
+    if blob[m.start():a.start()] == _puller_main_injection(alias):
+        return True, True, stripped, alias
+    return True, False, stripped, alias
+
+
 def _puller_main_injection(ipc_alias: str) -> bytes:
     """在 ipcMain 别名的 SaveMcpToUserDirectory 注册语句前插入 3 个 handler。
     写 config 前先落一份 config.json.puller-bak；动态 import 保持与原包一致。"""
@@ -905,9 +946,10 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
     pre_blob, main_blob = _blob(PULLER_PRELOAD_PATH), _blob(PULLER_MAIN_PATH)
     script_present = PULLER_SCRIPT_PATH in paths
     idx_tagged = PULLER_TAG.encode() in idx_bytes
-    pre_ok = pre_blob is not None and PULLER_MARKER in pre_blob
-    main_ok = main_blob is not None and PULLER_MARKER in main_blob
-    installed = script_present and idx_tagged and pre_ok and main_ok
+    pre_inj, pre_synced, pre_clean, _ = _puller_preload_state(pre_blob)
+    main_inj, main_synced, main_clean, _ = _puller_main_state(main_blob)
+    cur_script = _asar_entry_bytes(raw, data_start, paths[PULLER_SCRIPT_PATH]) if script_present else None
+    installed = script_present and idx_tagged and pre_inj and main_inj
 
     saved = None
     if side.is_file():
@@ -918,11 +960,21 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
         except Exception:
             saved = None
 
+    def _ver(ok: bool, synced: bool) -> str:
+        return "无" if not ok else ("有" if synced else "有（版本旧）")
+
     comp = (f"renderer 脚本: {'有' if script_present else '无'} | index.html 挂载: {'有' if idx_tagged else '无'} | "
-            f"preload 桥: {'有' if pre_ok else '无'} | main handler: {'有' if main_ok else '无'}")
+            f"preload 桥: {_ver(pre_inj, pre_synced)} | main handler: {_ver(main_inj, main_synced)}")
+
+    if puller_src is None:
+        puller_src = Path(__file__).resolve().parent / PULLER_SCRIPT_PATH.split("/")[-1]
+    old_script = (script_present and puller_src.is_file()
+                  and cur_script != puller_src.read_bytes())
 
     if check_only:
-        state = "已打" if installed else ("不完整" if (script_present or idx_tagged or pre_ok or main_ok) else "未打")
+        state = "已打" if installed else ("不完整" if (script_present or idx_tagged or pre_inj or main_inj) else "未打")
+        if installed and (not (pre_synced and main_synced) or old_script):
+            state = "已打（含旧版组件，重跑可自动更新）"
         print(f"[*] {asar}\n    模型拉取按钮注入: {state} | {comp} | sidecar: {'有' if saved else '无'} | "
               f"备份: {'有' if bak.is_file() else '无'}")
         return
@@ -932,22 +984,18 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
             print(f"[.] {asar}\n    未打模型拉取注入，跳过")
             return
         # 全程外科手术式还原：只摘除自己注入的字节段，不依赖 sidecar 指纹
-        # （其他补丁重打包会改变 asar 大小令指纹失配，但自身注入内容不变）
         stripped = idx_bytes.replace(PULLER_TAG.encode() + b"\n", b"").replace(PULLER_TAG.encode(), b"")
         overwrite = {PULLER_INDEX_PATH: stripped}
-        if pre_ok:
-            new_pre, n = PULLER_PRELOAD_STRIP.subn(b"", pre_blob)
-            if n != 1:
-                print(f"[!] {asar}\n    preload 注入段定位异常（命中 {n} 次，期望 1），拒绝还原")
+        if pre_inj:
+            if pre_clean is None:
+                print(f"[!] {asar}\n    preload 注入段形态不符（可能被手工改过），拒绝还原")
                 return
-            overwrite[PULLER_PRELOAD_PATH] = new_pre
-        if main_ok:
-            inj = PULLER_MAIN_STRIP.search(main_blob)
-            anchor = PULLER_MAIN_ANCHOR.search(main_blob)
-            if not inj or not anchor or inj.start() >= anchor.start():
-                print(f"[!] {asar}\n    main 注入段定位异常，拒绝还原")
+            overwrite[PULLER_PRELOAD_PATH] = pre_clean
+        if main_inj:
+            if main_clean is None:
+                print(f"[!] {asar}\n    main 注入段形态不符（可能被手工改过），拒绝还原")
                 return
-            overwrite[PULLER_MAIN_PATH] = main_blob[:inj.start()] + main_blob[anchor.start():]
+            overwrite[PULLER_MAIN_PATH] = main_clean
         new_size = _repack_asar(asar, overwrite, {PULLER_SCRIPT_PATH} if script_present else set())
         side.unlink(missing_ok=True)
         bak.unlink(missing_ok=True)
@@ -955,17 +1003,14 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
         print(f"[+] {asar}\n    已还原模型拉取注入（新大小 {new_size:,} 字节，备份已清理）")
         return
 
-    if puller_src is None:
-        puller_src = Path(__file__).resolve().parent / PULLER_SCRIPT_PATH.split("/")[-1]
     if not puller_src.is_file():
         raise SystemExit(f"[!] 找不到注入源脚本 {puller_src}（可用 --puller-src 指定路径）")
     script_bytes = puller_src.read_bytes()
-    cur_script = _asar_entry_bytes(raw, data_start, paths[PULLER_SCRIPT_PATH]) if script_present else None
 
-    # 幂等：四组件齐且注入脚本与源一致才跳过；脚本源变了会走重打包只更新脚本条目，
-    # 缺组件则逐组件补齐（index/preload/main 未变的不会重写）
-    if installed and cur_script == script_bytes:
-        print(f"[=] {asar}\n    已打模型拉取注入（脚本同源），跳过")
+    # 幂等：四组件齐、且 renderer/preload/main 注入内容均与现行实现逐字节一致才跳过。
+    # 只按 marker 判断会让旧版注入被误认成"已是最新"（换实现后不更新），必须内容比对。
+    if installed and cur_script == script_bytes and pre_synced and main_synced:
+        print(f"[=] {asar}\n    已打模型拉取注入（四组件均为当前版本），跳过")
         return
 
     # 锚点核实：三处定位全部唯一才动手
@@ -983,20 +1028,34 @@ def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src:
     if not bak.is_file():
         shutil.copyfile(asar, bak)
 
-    # 逐组件幂等：只改缺失的；sidecar 原件按组件记录、不覆盖已有记录
+    # 逐组件更新：仅写入与现行实现不一致的组件；sidecar 原件按组件记录、不覆盖已有记录
     rec = dict(saved or {})
-    overwrite: dict[str, bytes] = {PULLER_SCRIPT_PATH: script_bytes}
+    overwrite: dict[str, bytes] = {}
+    if cur_script != script_bytes:
+        overwrite[PULLER_SCRIPT_PATH] = script_bytes
     if not idx_tagged:
         overwrite[PULLER_INDEX_PATH] = idx_bytes.replace(b"</body>", PULLER_TAG.encode() + b"\n</body>", 1)
         rec.setdefault("index_original_b64", base64.b64encode(idx_bytes).decode())
-    if not pre_ok:
-        anchor = PULLER_PRELOAD_ANCHOR.search(pre_blob).end()
-        overwrite[PULLER_PRELOAD_PATH] = pre_blob[:anchor] + _puller_preload_injection(pre_m[0].decode()) + pre_blob[anchor:]
-        rec.setdefault("preload_original_b64", base64.b64encode(pre_blob).decode())
-    if not main_ok:
-        anchor = PULLER_MAIN_ANCHOR.search(main_blob).start()
-        overwrite[PULLER_MAIN_PATH] = main_blob[:anchor] + _puller_main_injection(main_m[0].decode()) + main_blob[anchor:]
-        rec.setdefault("main_original_b64", base64.b64encode(main_blob).decode())
+    if not pre_synced:
+        if pre_clean is None:
+            print(f"[!] {asar}\n    preload 已注入但形态不符（旧版/被改过），无法安全更新，拒绝"
+                  f"（先 --revert 或重装 ZCode）")
+            return
+        anchor = PULLER_PRELOAD_ANCHOR.search(pre_clean).end()
+        overwrite[PULLER_PRELOAD_PATH] = (pre_clean[:anchor]
+                                          + _puller_preload_injection(pre_m[0].decode())
+                                          + pre_clean[anchor:])
+        rec.setdefault("preload_original_b64", base64.b64encode(pre_clean).decode())
+    if not main_synced:
+        if main_clean is None:
+            print(f"[!] {asar}\n    main 已注入但形态不符（旧版/被改过），无法安全更新，拒绝"
+                  f"（先 --revert 或重装 ZCode）")
+            return
+        anchor = PULLER_MAIN_ANCHOR.search(main_clean).start()
+        overwrite[PULLER_MAIN_PATH] = (main_clean[:anchor]
+                                       + _puller_main_injection(main_m[0].decode())
+                                       + main_clean[anchor:])
+        rec.setdefault("main_original_b64", base64.b64encode(main_clean).decode())
 
     new_size = _repack_asar(asar, overwrite, set())
     rec.update({
