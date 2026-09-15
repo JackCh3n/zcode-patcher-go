@@ -393,6 +393,23 @@ USAGE_PATCHES = [
     },
 ]
 
+# 模型选择弹窗加宽（同样长度原地覆盖；key=None 表示按内容特征定位文件，
+# 不依赖 assets 文件名里的内容哈希，跨版本稳定）
+WIDTH_PATCHES = [
+    {
+        "key": None,
+        "pattern": b"j??`w-48`",
+        "replacement": b"j??`w-80`",
+        "desc": "渠道子菜单（选完供应商后的模型列表）宽度 192px → 320px",
+    },
+    {
+        "key": None,
+        "pattern": b":`w-48 max-h-72 overflow-y-auto`",
+        "replacement": b":`w-80 max-h-72 overflow-y-auto`",
+        "desc": "模型弹窗（无子菜单的扁平列表）宽度 192px → 320px",
+    },
+]
+
 
 def _asar_header_index(asar: Path):
     """解析 asar 头，返回 [(文件路径, 绝对偏移, 尺寸), ...]。"""
@@ -551,6 +568,103 @@ def process_usage_chart(asar: Path, check_only: bool, revert: bool) -> None:
             _asar_sync_integrity(asar, path, padded)
         print(f"    [{'+' if ok else '!'}] {fname} | {'写入成功（' + item['desc'] + '）' if ok else '写入失败'}")
         changed = True
+    if changed and not check_only:
+        side.write_text(json.dumps({"patches": saved}, ensure_ascii=False), encoding="utf-8")
+        print(f"    原始字节备份: {side.name}")
+
+
+# ------------------------------------------------- 模型弹窗加宽（asar 内同长度原地改字节）
+
+def process_model_width(asar: Path, check_only: bool, revert: bool) -> None:
+    """模型选择弹窗加宽：把 Tailwind 宽度类 w-48(192px) 换成 w-80(320px)。
+    与图表补丁同为「同长度字节级原地覆盖」（w-48/w-80 字面量等长），零重打包。
+    文件按内容特征定位（不依赖 assets 文件名哈希），跨版本稳定。"""
+    side = asar.with_name(asar.name + ".width-patch.json")
+    asar_size = asar.stat().st_size
+
+    if revert:
+        saved = _load_sidecar(side, asar_size)
+        if not saved:
+            print(f"[.] {asar}\n    没有当前版本的 sidecar 备份，跳过")
+            return
+        with open(asar, "r+b") as f:
+            for rec in saved:
+                f.seek(rec["offset"])
+                f.write(base64.b64decode(rec["original_b64"]))
+        for rec in saved:
+            _asar_sync_integrity(asar, rec["path"], base64.b64decode(rec["original_b64"]))
+        side.unlink()
+        print(f"[+] {asar}\n    已还原 {len(saved)} 处原始宽度字节")
+        return
+
+    entries = _asar_header_index(asar)
+    print(f"[*] {asar}")
+    saved = _load_sidecar(side, asar_size)
+    changed = False
+
+    for item in WIDTH_PATCHES:
+        if item["key"] is not None:
+            cands = [(p, o, s) for p, o, s in entries if item["key"] in p]
+        else:
+            cands = [(p, o, s) for p, o, s in entries
+                     if p.startswith("out/renderer/") and p.endswith(".js")
+                     and s and 1000 < s < 80_000_000]
+
+        def _scan(needle: bytes):
+            got = []
+            for p, o, s in cands:
+                with open(asar, "rb") as f:
+                    f.seek(o)
+                    raw = f.read(s)
+                cnt = raw.count(needle)
+                if cnt:
+                    got.append((p, o, s, raw, cnt))
+            return got
+
+        hits = _scan(item["pattern"])
+        if not hits:
+            # 未命中可能是「已打」（锚点已被替换掉）——用替换后形态确认
+            done = _scan(item["replacement"])
+            if len(done) == 1 and done[0][4] == 1:
+                print(f"    [=] {done[0][0].split('/')[-1]} | 已打（{item['desc']}）")
+                if not check_only:
+                    _asar_sync_integrity(asar, done[0][0], done[0][3])
+                continue
+            print(f"    [!] {item['desc']} | 未找到锚点（版本结构可能已变），跳过")
+            continue
+        if len(hits) > 1:
+            print(f"    [!] {item['desc']} | 锚点在 {len(hits)} 个文件中出现（期望 1），拒绝盲改")
+            continue
+        path, off, size, raw, cnt = hits[0]
+        fname = path.split("/")[-1]
+        if cnt != 1:
+            print(f"    [!] {fname} | {item['desc']}：锚点出现 {cnt} 次（期望 1），拒绝盲改")
+            continue
+
+        new = raw.replace(item["pattern"], item["replacement"], 1)
+        if len(new) != len(raw):
+            print(f"    [!] {fname} | 替换不等长（{len(raw)}→{len(new)}），拒绝改写")
+            continue
+        padded = new   # 等长，无需补齐
+        if not any(r.get("offset") == off for r in saved):
+            saved.append({
+                "path": path, "offset": off, "size": size,
+                "asar_size": asar_size, "original_b64": base64.b64encode(raw).decode(),
+            })
+        if check_only:
+            print(f"    [ ] {fname} | 未打（{item['desc']}）")
+            continue
+        with open(asar, "r+b") as f:
+            f.seek(off)
+            f.write(padded)
+            f.seek(off)
+            back = f.read(size)
+        ok = item["pattern"] not in back and len(back) == size
+        if ok:
+            _asar_sync_integrity(asar, path, padded)
+        print(f"    [{'+' if ok else '!'}] {fname} | {'写入成功（' + item['desc'] + '）' if ok else '写入失败'}")
+        changed = True
+
     if changed and not check_only:
         side.write_text(json.dumps({"patches": saved}, ensure_ascii=False), encoding="utf-8")
         print(f"    原始字节备份: {side.name}")
@@ -1093,6 +1207,8 @@ def main() -> None:
                     help="按结构特征提取当前内核的档位解析函数锚点（新版本升级后用）")
     ap.add_argument("--usage-chart", action="store_true",
                     help="补丁用量页：去掉趋势图 Top6 与饼图 Top5+其他模型 的截断，全部模型展示")
+    ap.add_argument("--model-width", action="store_true",
+                    help="加宽模型选择弹窗（含渠道子菜单）192px→320px，长模型名不再被截断")
     ap.add_argument("--tps-footer", action="store_true",
                     help="注入 TPS 统计栏：输入框工具栏常驻胶囊（● 时间 · 首 token · tok/s · out），asar 重打包级")
     ap.add_argument("--tps-src", default=None,
@@ -1103,13 +1219,18 @@ def main() -> None:
                     help="指定注入的 zcode-model-puller.js 路径（默认用本脚本同目录自带的）")
     args = ap.parse_args()
 
-    if args.usage_chart or args.tps_footer or args.model_puller:
+    if args.usage_chart or args.tps_footer or args.model_puller or args.model_width:
         asars = _resolve_asars(args.target)
         if args.usage_chart:
             mode = "检查" if args.check else ("还原" if args.revert else "打补丁")
             print(f"=== 用量页去截断补丁，目标 {len(asars)} 处，模式：{mode} ===")
             for a in asars:
                 process_usage_chart(a, args.check, args.revert)
+        if args.model_width:
+            mode = "检查" if args.check else ("还原" if args.revert else "打补丁")
+            print(f"=== 模型弹窗加宽补丁，目标 {len(asars)} 处，模式：{mode} ===")
+            for a in asars:
+                process_model_width(a, args.check, args.revert)
         if args.tps_footer:
             mode = "检查" if args.check else ("还原" if args.revert else "打补丁")
             print(f"=== TPS 统计栏注入，目标 {len(asars)} 处，模式：{mode} ===")

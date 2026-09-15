@@ -12,10 +12,10 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 | 思考等级透传 | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
 | 打开状态栏 | 输入框工具栏 TPS 统计胶囊 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
-两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --tps-footer --model-puller`。
-
+两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --model-puller`。
 另有命令行版拉模型（不动 asar，直接同步 config.json）：`python scripts/model_pull.py --all [--dry-run]`。
 
 ## 标准执行流程（AI 代执行与人工自助通用）
@@ -63,6 +63,7 @@ ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍：
 ```bash
 python zcode_patcher.py --check            # 思考等级补丁状态
 python zcode_patcher.py --usage-chart --check
+python zcode_patcher.py --model-width --check
 python zcode_patcher.py --tps-footer --check
 python zcode_patcher.py --model-puller --check
 ```
@@ -189,7 +190,30 @@ python zcode_patcher.py --usage-chart --revert   # 从 sidecar 还原全部原�
 - 两处调色盘均 6 色循环取色，第 7+ 个模型颜色重复，靠图例/标签区分
 - 定位按文件名特征 + 截断表达式匹配，与文件名哈希无关，跨版本稳定（3.9.1→3.9.2 文件名哈希变化仍能命中）
 
-## 三、打开状态栏：TPS 统计胶囊
+## 三、加宽模型选择弹窗
+
+模型选择浮窗（点工具栏模型名弹出的那个，含「先选渠道、再选模型」的二级子菜单）默认宽 `w-48` = **192px**，长模型名（如 `cn:deepseek-v4.1-flash`、带前缀的供应商模型）会被 `truncate` 截断，只能靠 hover 的 `title` 看全。本补丁把它加宽到 `w-80` = **320px**。
+
+```bash
+python zcode_patcher.py --model-width            # 打补丁（同长度字节级原地覆盖）
+python zcode_patcher.py --model-width --check    # 查状态
+python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
+```
+
+两处补丁点（都在渲染层主 bundle，如 `out/renderer/assets/styles-*.js`）：
+
+| 位置 | 原始 | 补丁后 |
+|---|---|---|
+| 二级子菜单（渠道 → 模型列表，`j??\`w-48\``） | 192px | 320px |
+| 扁平弹窗（无渠道分组的单层列表，`\`w-48 max-h-72 overflow-y-auto\``） | 192px | 320px |
+
+- **零重打包**：`w-48` 与 `w-80` 字面量**等长**（同为 4 字符），属同长度原地覆盖，asar 头/offset 零改动；ZCode 运行中也能写（不涉及文件替换）
+- 宽度类名需已编译进 CSS：已核实 `.w-80` 存在（若未来版本裁剪了该类，可换 `w-64`/`w-72`/`w-96`，都已在 CSS 中；`min-w-*` 多数未编译，勿用）
+- **文件按内容定位**（不依赖 assets 文件名里的哈希），跨版本稳定
+- 状态判定兼容"已打"：锚点已被替换后，用替换后形态反查确认，不会误报「未找到锚点」
+- 原始字节存 `app.asar.width-patch.json`，与图表补丁同为字节级 sidecar
+
+## 四、打开状态栏：TPS 统计胶囊
 
 > 本能力与思考等级补丁源自 [linux.do 帖子 2886711](https://linux.do/t/topic/2886711)（作者 lanvv）分享的 `zcode-patcher.zip`（原帖授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
@@ -251,7 +275,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后 `--tps-footer --revert && --tps-footer` 重打（幂等） |
 
-## 四、模型拉取按钮：设置页一键拉取/勾选模型
+## 五、模型拉取按钮：设置页一键拉取/勾选模型
 
 设置 → 模型供应商页注入「⚡️ 自动拉取模型」按钮：点开弹窗自动拉取该供应商 `/models` 接口的模型列表，标注「已添加/新模型」并勾选，保存后经**原生 IPC** 读写 `~/.zcode/v2/config.json` 并自动刷新界面——不用退出 ZCode、不用手改 config。
 

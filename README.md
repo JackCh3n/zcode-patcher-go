@@ -20,8 +20,9 @@
 | 1 | **思考等级透传** | 自定义模型（内核白名单之外）的档位真正下发到请求体：anthropic 协议发 `budget_tokens`，OpenAI 兼容发 `reasoning_effort` 原名。内核补丁惰性兜底，白名单模型行为零变化 | `python scripts/zcode_patcher.py` |
 | 2 | **用量页去截断** | 「设置 → 用量」趋势图不再只画 Top 6、饼图不再只画 Top 5 + 「其他模型」，全部模型完整展示 | `--usage-chart` |
 | 3 | **TPS 状态栏** | 输入框工具栏常驻统计胶囊：`● 21:03 · 首 token 37s · 32 tok/s · out 1.7k`——当前会话最近一轮，流式中实时刷新，切换会话即消失，无常驻服务 | `--tps-footer` |
-| 4 | **模型拉取按钮** | 设置页「⚡️ 自动拉取模型」：从供应商 `/models` 拉取模型列表，勾选即写入配置；**新增供应商一步到位**（自动建条目）；元数据感知（上下文 / 输出上限 / 思考档位按服务器真实值写入） | `--model-puller` |
-| 5 | **CLI 拉模型** | 不动客户端，直接同步 `config.json`；`--refresh` 按服务器元数据刷新已有模型的 limit 与档位 | `python scripts/model_pull.py --all` |
+| 4 | **模型弹窗加宽** | 模型选择浮窗（含渠道二级菜单）192px → 320px，长模型名不再被截断成 `cn:deepseek-…` | `--model-width` |
+| 5 | **模型拉取按钮** | 设置页「⚡️ 自动拉取模型」：从供应商 `/models` 拉取模型列表，勾选即写入配置；**新增供应商一步到位**（自动建条目）；元数据感知（上下文 / 输出上限 / 思考档位按服务器真实值写入） | `--model-puller` |
+| 6 | **CLI 拉模型** | 不动客户端，直接同步 `config.json`；`--refresh` 按服务器元数据刷新已有模型的 limit 与档位 | `python scripts/model_pull.py --all` |
 
 ## 快速开始
 
@@ -34,13 +35,15 @@ cd zcode-patcher
 # 只读检查（可放心先跑）
 python scripts/zcode_patcher.py --check
 python scripts/zcode_patcher.py --usage-chart --check
+python scripts/zcode_patcher.py --model-width --check
 python scripts/zcode_patcher.py --tps-footer --check
 python scripts/zcode_patcher.py --model-puller --check
 
 # 打补丁（可单打，也可组合）
 python scripts/zcode_patcher.py                  # ① 思考等级透传（内核）
 python scripts/zcode_patcher.py --usage-chart    # ② 用量图表去截断
-python scripts/zcode_patcher.py --tps-footer     # ③ TPS 状态栏
+python scripts/zcode_patcher.py --model-width    # ③ 模型弹窗加宽
+python scripts/zcode_patcher.py --tps-footer     # ④ TPS 状态栏
 python scripts/zcode_patcher.py --model-puller   # ④ 模型拉取按钮
 ```
 
@@ -56,6 +59,7 @@ python scripts/zcode_patcher.py "D:\ZCode"                    # Windows
 ```bash
 python scripts/zcode_patcher.py --revert                   # 还原思考等级
 python scripts/zcode_patcher.py --usage-chart --revert     # 还原用量图表
+python scripts/zcode_patcher.py --model-width --revert     # 还原模型弹窗宽度
 python scripts/zcode_patcher.py --tps-footer --revert      # 还原 TPS 状态栏
 python scripts/zcode_patcher.py --model-puller --revert    # 还原模型拉取按钮
 ```
@@ -106,10 +110,11 @@ ZCode 的档位选择器对"非内核白名单"的自定义模型能选中档位
 
 ```
 SKILL.md                        # ZCode Skill 定义（AI 代执行流程 + 逆向分析笔记）
-scripts/zcode_patcher.py        # 主工具：四个补丁（思考等级 / 用量图表 / TPS / 拉取按钮）
+scripts/zcode_patcher.py        # 主工具：五个补丁（思考等级 / 用量图表 / 弹窗加宽 / TPS / 拉取按钮）
 scripts/model_pull.py           # CLI：拉取模型、按服务器元数据刷新已有模型
 scripts/zcode-tps.js            # TPS 状态栏注入脚本
 scripts/zcode-model-puller.js   # 模型拉取按钮注入脚本（含 preload/main 注入的配套设计）
+scripts/tap_proxy.py            # 请求捕获代理：打印 ZCode 真实发出的请求体（验证思考档位等参数是否生效）
 ```
 
 ## 作为 ZCode Skill 使用
