@@ -217,11 +217,14 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 
 > **两条实现路线（按 ZCode 版本选择）**
 >
-> - **v2（默认，`zcode-tps-v2.js`）——纯 DOM 观测，不接触任何端口，3.12.2+ 安全**
->   数据来自 composer 里 ZCode 自己渲染的隐藏节点：
->   `<span data-testid="v4-model-config" data-usage-used="…" data-usage-max="…" data-thought="…" />`
->   显示 `● ctx 30k/1m · 3% · high · 12 字符/s`（上下文用量、占比、思考档位、流式速率估算）。
->   诚实说明：**拿不到**精确 usage delta 与首 token 延迟——那需要事件流。
+> - **v3（默认，`zcode-tps-v2.js`）——读 ZCode 自己渲染的真实 token，零端口**
+>   主数据源：**模型调用轨迹**面板每行摘要的元数据节点（由 ZCode 的 `VNt()` 渲染）：
+>   `<span data-trajectory-call-metadata>IN 1,234· OUT 5,678· 1.2s· 12:34</span>`
+>   其 usage 来自 `record.response.usage`（真实 inputTokens/outputTokens）+ `durationMs`。
+>   轨迹在工作期间默认展开（`HMt(): {expanded:!0}`），故生成中即可读到实时值。
+>   显示 `● out 18k · 3.4s · 45 tok/s`：本轮累计输出（多调用求和）、耗时、速率（OUT 增量/时间）。
+>   回退：轨迹不可用时读 `data-testid=v4-model-config` 的 `data-usage-used`（仅上下文用量）。
+>   局限：轨迹用虚拟滚动，滚出视口的行会被卸载 → 极端长轮次的早期调用不计入合计。
 >
 > - **v1（`--tps-v1-legacy`）——截取 ServicePort 事件流，仅 ≤3.11.x 可用**
 >   ⚠️ 在 **3.12.2+ 会导致客户端卡在启动界面（需重装或 `scripts/restore_clean.py` 回滚）**。

@@ -1,114 +1,136 @@
 /**
- * ZCode 状态胶囊 v2（3.12.2+ 安全版）—— 纯 DOM 观测，零端口
- * =========================================================
- * 与 v1 的根本区别：**不接触 ServicePort**
+ * ZCode 状态胶囊 v3 —— 读 ZCode 自己渲染的真实 token 数（零端口，3.12.2+ 安全）
+ * =====================================================================
+ * 数据源（两条，都只读 DOM，不接触 ServicePort / IPC）：
  *
- * v1 靠 window.postMessage 转交的 ServicePort 截取会话事件流。实测（Node MessagePort
- * 复现 + 用户实机验证）证明该方案在 3.12.2 会破坏客户端启动：
- *   MessagePort 的消息只分发一次给"分发时已注册的监听器"；v1 在普通脚本阶段
- *   （早于 type=module 的应用主包）就注册并 start，导致服务端的 Initialize 握手
- *   被我们消费掉 —— 应用的协议客户端永远收不到握手，启动流程卡死。
- *   复现：我们收到 ["Initialize","usage.delta"]，应用只收到 ["usage.delta"]。
- * 因此 v2 改为**只观察 DOM**：ZCode 把关键状态直接写在 composer 的隐藏节点上：
- *   <span data-testid="v4-model-config" data-usage-used="29568" data-usage-max="1000000"
- *         data-thought="high" data-thought-levels="disabled,low,high,max" data-model="..." />
+ *  A) 本轮精确 token（首选）——「模型调用轨迹」面板里的元数据节点：
+ *       <span data-trajectory-call-metadata>OUT 5,678 · 1.2s</span>
+ *     由 ZCode 的 VNt() 渲染，text 形如 "IN 1,234 · OUT 5,678 · 1.2s · 12:34"。
+ *     轨迹在工作期间默认展开（HMt(): {expanded:!0}），故生成中即可读到实时值；
+ *     一轮含多次模型调用时会有多条，取最后一条（当前进行中的那次）与前缀和。
  *
- * 能力（诚实说明）：上下文用量、模型、档位、生成中状态、生成耗时、由 DOM 变动速率
- * 估算的"输出速度（字符/秒，粗略）"。**拿不到**精确 usage delta / 首 token 延迟。
+ *  B) 上下文用量（回退）——composer 隐藏节点：
+ *       <span data-testid="v4-model-config" data-usage-used="29568" data-usage-max="1000000" />
  *
- * 安全性：只读 DOM、只写自己的 host 元素；不 start 任何端口；不调用应用 API；
- * 任何异常静默；未找到 composer 时自清理，绝不残留。
+ * 为什么不用端口：v1 截取 ServicePort 会让 ZCode 3.12.2 卡在启动界面
+ * （MessagePort 消息只分发给分发瞬间已注册的监听器，我们提前 start 消费掉了
+ *  服务端 Initialize 握手）。详见 SKILL.md。本版本静态扫描确认零端口接触。
+ *
+ * 显示：● OUT <本轮输出> · <耗时> · <tok/s>   （生成中实时；无数据时自动降级）
+ * 不显示：上下文进度/百分比/思考档位（按用户要求移除）。
  */
 (() => {
-  if (window.__ztps2) return;
-  window.__ztps2 = true;
+  if (window.__ztps3) return;
+  window.__ztps3 = true;
 
-  const BAR_ATTR = "data-ztps2-bar";
-  const diag = (window.__ztps2Diag = {
-    version: "2.0-dom",
+  const BAR_ATTR = "data-ztps3-bar";
+  const diag = (window.__ztps3Diag = {
+    version: "3.0-trajectory",
     loadedAt: new Date().toISOString(),
-    portTouched: false,   // 恒为 false —— 本版本保证不碰端口
+    portTouched: false,
+    samples: [],
   });
 
-  const ATTRS = {
-    usageUsed: "data-usage-used",
-    usageMax: "data-usage-max",
-    model: "data-model",
-    provider: "data-provider",
-    thought: "data-thought",
-    thoughtLevels: "data-thought-levels",
+  // ---------- A) 轨迹元数据：解析 "IN x · OUT y · 1.2s · 12:34" ----------
+  const NUM = (s) => {
+    const n = Number(String(s ?? "").replace(/[,\s]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  };
+  const parseDur = (s) => {
+    // 支持 "1.2s" / "12.3s" / "1m 5s" / "500ms" / "2m"
+    const str = String(s || "").trim();
+    let ms = 0, hit = false;
+    let m;
+    if ((m = /(\d+(?:\.\d+)?)\s*h/i.exec(str))) { ms += parseFloat(m[1]) * 3600e3; hit = true; }
+    if ((m = /(\d+(?:\.\d+)?)\s*m(?!s)/i.exec(str))) { ms += parseFloat(m[1]) * 60e3; hit = true; }
+    if ((m = /(\d+(?:\.\d+)?)\s*s/i.exec(str))) { ms += parseFloat(m[1]) * 1e3; hit = true; }
+    if (!hit && (m = /(\d+(?:\.\d+)?)\s*ms/i.exec(str))) { ms += parseFloat(m[1]); hit = true; }
+    return hit ? Math.round(ms) : null;
   };
 
-  // ---------- 读取 DOM 上的会话指标 ----------
-  function readConfigNode() {
-    // 优先 composer 工具条里的那个（当前会话），回退到页面内任意一个
+  function readTrajectory() {
+    const nodes = document.querySelectorAll("[data-trajectory-call-metadata]");
+    if (!nodes.length) return null;
+    // 可见性判据（不依赖 offsetParent——虚拟滚动/父子链异常时会误伤）：
+    // 排除被 display:none 的祖先隐藏的节点，用 getClientRects() 判断实际渲染盒。
+    const visible = (n) => {
+      try {
+        if (n.getClientRects && n.getClientRects().length > 0) return true;
+        // jsdom / 非布局环境回退：检查自身与祖先链上的 hidden 类
+        let cur = n;
+        while (cur && cur !== document.body) {
+          const c = typeof cur.className === "string" ? cur.className : "";
+          if (/(^|\s)hidden(\s|$)/.test(c)) return false;
+          if (cur.getAttribute && cur.getAttribute("aria-hidden") === "true") return false;
+          cur = cur.parentElement;
+        }
+        return true;
+      } catch (err) { return true; }
+    };
+    let last = null;         // 最后一条 = 当前进行中的调用
+    let sumOut = 0;          // 本轮累计输出（所有调用的 OUT 之和）
+    let sumIn = 0;
+    let counted = 0;
+    for (const n of nodes) {
+      if (!visible(n)) continue;
+      const txt = n.textContent || "";
+      const mo = /OUT\s*([\d,]+)/i.exec(txt);
+      const mi = /IN\s*([\d,]+)/i.exec(txt);
+      const md = /·\s*([0-9.]+\s*(?:ms|s|m|h)[^·]*)/i.exec(txt);
+      const item = {
+        out: mo ? NUM(mo[1]) : null,
+        inTok: mi ? NUM(mi[1]) : null,
+        durMs: md ? parseDur(md[1]) : null,
+        raw: txt.slice(0, 80),
+      };
+      if (item.out != null) sumOut += item.out;
+      if (item.inTok != null) sumIn += item.inTok;
+      last = item;
+      counted++;
+    }
+    if (counted === 0) return null;
+    return { last, sumOut, sumIn, count: counted };
+  }
+
+  // ---------- B) 回退：composer 上下文用量 ----------
+  function readContextUsage() {
     const all = document.querySelectorAll("[data-testid='v4-model-config']");
-    if (!all.length) return null;
-    // 选可见的、最靠下的（composer 在底部）
-    const vis = Array.from(all).filter((el) => el.offsetParent != null);
-    const list = vis.length ? vis : Array.from(all);
-    return list.sort((a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top)[0];
+    for (const el of all) {
+      const used = NUM(el.getAttribute("data-usage-used"));
+      if (used != null) return { used, max: NUM(el.getAttribute("data-usage-max")) };
+    }
+    return null;
   }
 
-  function readStats() {
-    const el = readConfigNode();
-    if (!el) return null;
-    const num = (v) => {
-      const n = Number(String(v ?? "").replace(/[,_\s]/g, ""));
-      return Number.isFinite(n) ? n : null;
-    };
-    return {
-      used: num(el.getAttribute(ATTRS.usageUsed)),
-      max: num(el.getAttribute(ATTRS.usageMax)),
-      model: el.getAttribute(ATTRS.model) || "",
-      provider: el.getAttribute(ATTRS.provider) || "",
-      thought: el.getAttribute(ATTRS.thought) || "",
-      levels: el.getAttribute(ATTRS.thoughtLevels) || "",
-    };
-  }
-
-  // ---------- 生成中判定 + 输出速率估算 ----------
-  // 依据：会话区文本长度 + 停止按钮存在性。3.12.2 的停止按钮 testid 为 v4-stop，
-  // 生成中才渲染；同时用文本长度变化速率估算字符/秒。
-  const textLen = () => {
-    let n = 0;
-    document.querySelectorAll("section[data-turn-id]").forEach((s) => {
-      n += (s.textContent || "").length;
-    });
-    return n;
-  };
+  // ---------- 生成中判定（停止按钮存在即生成中） ----------
   const isStreaming = () =>
     !!document.querySelector("[data-testid='v4-stop'], [data-testid='v4-composer-stop']");
 
-  const speed = {
-    samples: [],   // [ts, len]
-    lastTps: null,
-    push(len) {
-      const now = Date.now();
-      this.samples.push([now, len]);
-      const floor = now - 5000;
-      while (this.samples.length > 2 && this.samples[0][0] < floor) this.samples.shift();
+  // ---------- 速率：用 OUT 增量 + 时间戳算，比字符估算准得多 ----------
+  const rate = {
+    hist: [],   // [ts, sumOut]
+    last: null,
+    push(ts, out) {
+      this.hist.push([ts, out]);
+      const floor = ts - 6000;
+      while (this.hist.length > 2 && this.hist[0][0] < floor) this.hist.shift();
     },
-    value() {
-      const win = this.samples.filter((s) => Date.now() - s[0] <= 4000);
+    value(now) {
+      const win = this.hist.filter((h) => now - h[0] <= 4000);
       if (win.length >= 2) {
         const dt = (win[win.length - 1][0] - win[0][0]) / 1000;
         const dn = win[win.length - 1][1] - win[0][1];
-        if (dt >= 1 && dn > 0) {
-          this.lastTps = dn / dt;
-          return this.lastTps;
-        }
+        if (dt >= 1 && dn > 0) { this.last = dn / dt; return this.last; }
       }
-      return this.lastTps;   // 静默期保持最近值
+      return this.last;
     },
   };
 
-  // ---------- 工具栏行定位（与 v1 一致：发送按钮向上找 flex+items-end 行） ----------
+  // ---------- 工具栏行定位（发送按钮向上找 flex+items-end） ----------
   function findToolbarRow() {
     const card = document.querySelector("[data-testid='v4-composer']");
     if (!card) return null;
-    const send = document.querySelector("[data-testid='v4-composer-send']");
-    let cur = send;
+    let cur = document.querySelector("[data-testid='v4-composer-send']");
     while (cur && cur !== card.parentElement) {
       if (cur.tagName === "DIV") {
         const c = typeof cur.className === "string" ? cur.className : "";
@@ -132,7 +154,12 @@
     if (v < 1e9) return t(v / 1e6) + "m";
     return t(v / 1e9) + "b";
   };
-  const fmtSpeed = (v) => (v == null ? null : (v >= 10 ? String(Math.round(v)) : String(+v.toFixed(1))));
+  const fmtMs = (ms) => {
+    if (ms == null) return null;
+    const s = ms / 1000;
+    return s < 10 ? (+s.toFixed(1)) + "s" : Math.round(s) + "s";
+  };
+  const fmtRate = (v) => (v == null ? null : (v >= 10 ? String(Math.round(v)) : String(+v.toFixed(1))));
 
   // ---------- 渲染 ----------
   function render() {
@@ -142,21 +169,32 @@
         document.querySelectorAll(`[${BAR_ATTR}]`).forEach((el) => el.remove());
         return;
       }
-      const st = readStats();
-      if (!st || st.used == null) {
-        const old = row.querySelector(`:scope > [${BAR_ATTR}]`);
-        if (old) old.remove();
+      const streaming = isStreaming();
+      const traj = readTrajectory();
+      const ctx = readContextUsage();
+
+      // 主指标：本轮输出 token（轨迹优先）
+      let outTok = null, rateVal = null, durMs = null, src = null;
+      if (traj && traj.count > 0) {
+        outTok = traj.sumOut > 0 ? traj.sumOut : (traj.last && traj.last.out);
+        durMs = traj.last && traj.last.durMs;
+        src = "trajectory";
+        const now = Date.now();
+        if (streaming && outTok != null) rate.push(now, outTok);
+        rateVal = rate.value(now);
+      } else if (ctx) {
+        // 回退：只有上下文用量，无法拆出输出量
+        src = "context";
+      }
+
+      const hasData = outTok != null || ctx != null;
+      let host = row.querySelector(`:scope > [${BAR_ATTR}]`);
+      if (!hasData) {
+        if (host) host.remove();
         return;
       }
-      const streaming = isStreaming();
-      const len = textLen();
-      if (streaming) speed.push(len);
-      const spd = streaming ? speed.value() : speed.value();
 
-      const pct = st.max ? Math.round((st.used / st.max) * 1000) / 10 : null;
-      const key = [st.used, st.max, st.thought, st.model, streaming, spd ? Math.round(spd) : null].join("|");
-
-      let host = row.querySelector(`:scope > [${BAR_ATTR}]`);
+      const key = [outTok, durMs, rateVal ? Math.round(rateVal) : null, streaming, src].join("|");
       if (!host) {
         host = document.createElement("div");
         host.setAttribute(BAR_ATTR, "1");
@@ -189,11 +227,15 @@
       if (streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
       segs.push({ p: 0, nodes: [dot] });
 
-      segs.push({ p: 1, nodes: [span("ctx "), span(fmtTok(st.used), "VALUE"),
-                                span("/" + fmtTok(st.max))] });
-      if (pct != null) segs.push({ p: 2, nodes: [span(pct + "%", "VALUE")] });
-      if (spd != null && streaming) segs.push({ p: 3, nodes: [span(fmtSpeed(spd) + " 字符/s", "ACCENT")] });
-      if (st.thought) segs.push({ p: 4, nodes: [span(st.thought)] });
+      if (outTok != null) {
+        segs.push({ p: 1, nodes: [span("out "), span(fmtTok(outTok), "VALUE")] });
+      } else if (ctx) {
+        segs.push({ p: 1, nodes: [span("ctx "), span(fmtTok(ctx.used), "VALUE")] });
+      }
+      const rv = fmtRate(rateVal);
+      if (rv != null && streaming) segs.push({ p: 2, nodes: [span(rv + " tok/s", "ACCENT")] });
+      const dv = fmtMs(durMs);
+      if (dv != null) segs.push({ p: 3, nodes: [span(dv)] });
 
       segs.forEach((g, i) => {
         if (i > 0) {
@@ -204,9 +246,8 @@
       });
       segs.forEach((g) => g.nodes.forEach((n) => host.appendChild(n)));
 
-      // 溢出降级：先丢档位、再丢百分比，保留 ctx 与速度
       try {
-        for (const drop of [4, 2, 1]) {
+        for (const drop of [3, 2, 1]) {
           if (host.scrollWidth <= host.clientWidth + 1) break;
           const g = segs.find((x) => x.p === drop);
           if (!g) continue;
@@ -214,17 +255,17 @@
         }
       } catch (err) { /* 静默 */ }
 
-      diag.lastRender = { used: st.used, max: st.max, streaming, spd, thought: st.thought };
+      diag.lastRender = { outTok, rateVal, durMs, streaming, src, trajCount: traj ? traj.count : 0 };
     } catch (err) { /* 静默 */ }
   }
 
   // ---------- 启动 ----------
   function start() {
-    setInterval(render, 1000);          // 指标刷新（含流式速率采样）
+    setInterval(render, 1000);
     try {
       const mo = new MutationObserver(() => {
         clearTimeout(mo._t);
-        mo._t = setTimeout(render, 80);  // 防抖，避免自激
+        mo._t = setTimeout(render, 80);   // 防抖，避免自激
       });
       mo.observe(document.body, { childList: true, subtree: true, characterData: true });
     } catch (err) { /* 静默 */ }
