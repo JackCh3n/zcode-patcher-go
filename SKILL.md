@@ -11,7 +11,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 |---|---|---|---|
 | 思考等级透传 | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
-| 打开状态栏 | 输入框工具栏 TPS 统计胶囊 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| ⚠️ 打开状态栏（**3.12.2+ 不可用，勿装**） | 输入框工具栏 TPS 统计胶囊 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
@@ -64,7 +64,6 @@ ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍：
 python zcode_patcher.py --check            # 思考等级补丁状态
 python zcode_patcher.py --usage-chart --check
 python zcode_patcher.py --model-width --check
-python zcode_patcher.py --tps-footer --check
 python zcode_patcher.py --model-puller --check
 ```
 
@@ -214,6 +213,21 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 - 原始字节存 `app.asar.width-patch.json`，与图表补丁同为字节级 sidecar
 
 ## 四、打开状态栏：TPS 统计胶囊
+
+> ⚠️ **ZCode 3.12.2+ 请勿安装本补丁（会导致客户端卡在启动界面，需重装恢复）**
+>
+> 原因：TPS 依赖截取 ZCode 内部会话通信端口（preload 经 `window.postMessage` 转交的
+> `ServicePort`）。MessagePort 是单一消费者语义——我们 `port.start()` 接管后，
+> **ZCode 应用自身就收不到消息**，启动流程卡在数据库初始化阶段。
+>
+> 版本差异：≤3.11.x 的转交消息是**字符串**（`postMessage("zcode:service-port", ...)`），
+> 我们按字符串比较时"恰好"没匹配上，所以没抢端口、也就没冲突；3.12.2 改为**对象**
+> （`postMessage({type:"zcode:service-port",...})`）后，为修"胶囊不显示"而加的兼容逻辑
+> 让它真正接管了端口，冲突随即暴露。
+>
+> 结论：**该补丁在 3.12.2+ 无可用形态**（除非改为非侵入式数据源，如轮询 DOM 上的
+> `data-usage-used` 等属性——tps 脚本原设计依赖事件流，重构成本较高）。
+> 保留 `--revert` 仅供已装环境卸载使用。
 
 > 本能力与思考等级补丁源自 [linux.do 帖子 2886711](https://linux.do/t/topic/2886711)（作者 lanvv）分享的 `zcode-patcher.zip`（原帖授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
