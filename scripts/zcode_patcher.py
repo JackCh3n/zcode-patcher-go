@@ -967,7 +967,10 @@ def _refresh_chart_sidecar(asar: Path) -> None:
         print(f"[*] 已同步 {side.name} 的 offset/指纹到重打包后的 asar")
 
 
-def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path | None) -> None:
+def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path | None,
+                       tps_v2: bool = True) -> None:
+    """tps_v2=True（默认）注入 zcode-tps-v2.js：纯 DOM 观测，不接触 ServicePort，
+    在 ZCode 3.12.2+ 上安全（v1 会抢消费启动握手导致客户端卡死，见 SKILL.md 说明）。"""
     side = asar.with_name(asar.name + ".tps-patch.json")
     bak = asar.with_name(asar.name + ".tps.bak")
     asar_size = asar.stat().st_size
@@ -1013,7 +1016,7 @@ def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path
         return
 
     if tps_src is None:
-        tps_src = Path(__file__).resolve().parent / "zcode-tps.js"
+        tps_src = Path(__file__).resolve().parent / ("zcode-tps-v2.js" if tps_v2 else "zcode-tps.js")
     if not tps_src.is_file():
         raise SystemExit(f"[!] 找不到注入源脚本 {tps_src}（可用 --tps-src 指定路径）")
     script_bytes = tps_src.read_bytes()
@@ -1222,7 +1225,9 @@ def main() -> None:
     ap.add_argument("--tps-footer", action="store_true",
                     help="注入 TPS 统计栏：输入框工具栏常驻胶囊（● 时间 · 首 token · tok/s · out），asar 重打包级")
     ap.add_argument("--tps-src", default=None,
-                    help="指定注入的 zcode-tps.js 路径（默认用本脚本同目录自带的）")
+                    help="指定注入脚本路径（默认用本脚本同目录的 zcode-tps-v2.js）")
+    ap.add_argument("--tps-v1-legacy", action="store_true",
+                    help="改用旧版 zcode-tps.js（⚠ 会截取 ServicePort，ZCode 3.12.2+ 会导致客户端卡在启动界面）")
     ap.add_argument("--model-puller", action="store_true",
                     help="注入模型拉取按钮：设置页「自动拉取模型」，经 preload/main IPC 读写 config，asar 重打包级")
     ap.add_argument("--puller-src", default=None,
@@ -1247,7 +1252,7 @@ def main() -> None:
             src = Path(args.tps_src) if args.tps_src else None
             for a in asars:
                 try:
-                    process_tps_footer(a, args.check, args.revert, src)
+                    process_tps_footer(a, args.check, args.revert, src, tps_v2=not args.tps_v1_legacy)
                 except PermissionError:
                     print(f"[!] {a}\n    文件被占用（ZCode 正在运行）或无写入权限；完全退出 ZCode 后重试")
         if args.model_puller:
