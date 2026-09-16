@@ -1,17 +1,33 @@
 /**
- * ZCode TPS Footer v1.0.1 —— 输入框工具栏统计胶囊（无常驻服务）
- * 当前会话最近一轮: ● 时间 · 首 token Xs · X tok/s · out X（生成中实时刷新）
+ * ZCode 状态栏：TPS 统计胶囊 —— 事件流实现（唯一方案）
+ * ==================================================
+ * 输入框工具栏常驻胶囊：● 时间 · 首 token · tok/s · out（当前会话最近一轮）
  *
- * 数据源: 页面内 MessagePort 会话事件流（preload 转交的 zcode:service-port）
- *   - conversation 行事件: turnHeader / userInput / reasoning / assistantText / row.delta(文本增量)
- *   - version:1 事件流: usage.delta(精确 usage，每次模型请求完成时发) / stream.chunk(首块+心跳)
- * 指标口径:
- *   - 流式中 tok/s 与 out 为估算(CJK 1 字≈1 token、其余 4 字符≈1 token)，4s 滑动窗口即时速度；
- *     usage.delta 到达后用精确值覆盖。轮结束后为精确值(精确 out ÷ 首块→末次 usage 解码窗口)。
- *   - 工具执行等静默期速度保持最近值；点停止/出错未报 usage 时 out 以内容估算兜底；
- *     同一 turnId 复用(编辑重发/重试)时自动清零旧统计。
- * 渲染: 只认「DOM 可见轮次 + data-session-id 匹配当前会话」，切换会话立即消失；
- *       数据未变零 DOM 写，避免 MutationObserver 自激。任何异常静默，绝不影响主界面。
+ * 数据源（ZCode 主进程经 window.postMessage 转交的 ServicePort 事件流）：
+ *   - version:1 事件流：usage.delta（真实 outputTokens/inputTokens）、stream.chunk
+ *   - conversation 行事件：turnHeader / userInput / reasoning / assistantText / row.delta
+ * 由此得到精确的 tok/s（4s 滑动窗口）、首 token 延迟、out（本轮累计输出）。
+ *
+ * ⚠️ 关键约束：**绝不调用 port.start()**
+ *   MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"。本脚本是普通
+ *   script（早于 type=module 的应用主包执行），若先 start() 就会消费掉服务端的
+ *   Initialize 启动握手 → 应用的协议客户端永远收不到握手 → ZCode 3.12.2 卡在启动界面。
+ *   因此只 addEventListener，把 start() 留给应用；届时双方都能收到消息。
+ *
+ *   真实 Chrome 实测（MessageChannel，双方持有同一 port）：
+ *     我们先 start()          → 我们 ["Initialize"]，应用 []            ✗ 卡启动
+ *     我们不 start、应用 start → 我们 ["Initialize"]，应用 ["Initialize"] ✓ 正常
+ *   注意：不能用 Node 验证此语义——Node 的 MessagePort 在 addEventListener 时隐式
+ *   start，会让"不 start"也失败，从而得出错误结论。
+ *
+ * 已知特性：tok/s 在开始生成后约 1~4 秒才出现（需要滑动窗口内 ≥2 个采样点，且首块到达
+ *   前的思考阶段无文本增量可算），期间只显示 ● 与时间，属预期。
+ *
+ * 原始版本来自 linux.do 帖子 2886711（作者 lanvv）分享的 zcode-patcher.zip，
+ * 本实现仅删除 port.start() 一行并补充诊断，计算逻辑与原版一致。
+ *
+ * 安全：只读事件流、只写自己的 host 元素；异常静默；找不到工具栏行时自清理。
+ * 回滚：脚本/补丁异常时用 scripts/restore_clean.py --latest 秒级还原，无需重装。
  */
 (() => {
   if (window.__ztps) return;
@@ -471,10 +487,16 @@
   function hookPort(port) {
     if (!port || port.__ztps) return;
     port.__ztps = true;
+    // 关键：只注册监听，**绝不调用 port.start()**
+    // start() 会让消息只派发给"启用瞬间"的监听器，从而吃掉应用的 Initialize 握手。
+    // 交给应用 start；届时所有已注册监听器（含我们）同时收到消息。
     port.addEventListener("message", (ev) => handleFrame(ev.data));
-    port.start();
-    window.__ztpsPort = port;   // 调试用：暴露端口供旁路监听原始帧
-    if (diag) { diag.portHooked = true; diag.portHookedAt = new Date().toISOString(); }
+    window.__ztpsPort = port;   // 调试用
+    if (diag) {
+      diag.portHooked = true;
+      diag.portStarted = false;   // 恒为 false —— 本版本刻意不 start
+      diag.portHookedAt = new Date().toISOString();
+    }
   }
   // 端口转交的消息格式跨版本不同，两种都要认：
   //   旧版（≤3.11.x）：window.postMessage("zcode:service-port", "*", [port])   → data 为字符串

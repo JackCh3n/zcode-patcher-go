@@ -127,10 +127,11 @@ python scripts/probe_max_tokens.py ... --resume              # 断点续测（�
 SKILL.md                        # ZCode Skill 定义（AI 代执行流程 + 逆向分析笔记）
 scripts/zcode_patcher.py        # 主工具：五个补丁（思考等级 / 用量图表 / 弹窗加宽 / TPS / 拉取按钮）
 scripts/model_pull.py           # CLI：拉取模型、按服务器元数据刷新已有模型
-scripts/zcode-tps.js            # TPS 状态栏注入脚本
+scripts/zcode-tps.js            # TPS 状态栏注入脚本（事件流，唯一实现）
 scripts/zcode-model-puller.js   # 模型拉取按钮注入脚本（含 preload/main 注入的配套设计）
 scripts/tap_proxy.py            # 请求捕获代理：打印 ZCode 真实发出的请求体（验证思考档位等参数是否生效）
 scripts/probe_max_tokens.py     # 探测模型真实输出上限（识别网关"静默钳制"：声称值 vs 实测值）
+scripts/restore_clean.py        # 紧急还原：从干净备份整包恢复（补丁异常时无需重装 ZCode）
 ```
 
 ## 作为 ZCode Skill 使用

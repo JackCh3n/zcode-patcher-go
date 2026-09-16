@@ -215,30 +215,33 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 
 ## 四、打开状态栏：TPS 统计胶囊
 
-> **实现路线**
+> **实现：`zcode-tps.js`（唯一方案）—— 读 ServicePort 事件流，含精确 tok/s / 首 token / out**
 >
-> **默认：`zcode-tps-v4.js` —— 事件流方案，但绝不调用 `port.start()`（含真实 tok/s、首 token）**
+> 数据来自 preload 转交的端口事件流：`usage.delta`（真实 outputTokens/inputTokens）、
+> `stream.chunk`、行事件（turnHeader/userInput/reasoning/assistantText/row.delta）。
 >
-> 数据来自 preload 转交的 ServicePort 事件流（`usage.delta` 真实 outputTokens、`stream.chunk`）。
-> 与旧 v1 的唯一差别：**只 `addEventListener`，把 `start()` 留给应用**。
+> ⚠️ **脚本内绝不调用 `port.start()`**（这是唯一但关键的约束）
 >
-> 为什么这一行之差是致命的（真实 Chrome / MessageChannel 实测，双方持有同一 port）：
+> MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"。脚本是普通 script，
+> 早于 `type=module` 的应用主包执行；若先 `start()` 就会消费掉服务端的 `Initialize`
+> 启动握手 → 应用协议客户端永远收不到握手 → **ZCode 3.12.2 卡在启动界面**。
+> 正确做法：只 `addEventListener`，把 `start()` 留给应用（届时双方都收到消息）。
+>
+> 真实 Chrome / MessageChannel 实测（双方持有同一 port）：
 >
 > | 做法 | 我们收到 | 应用收到 | 结果 |
 > |---|---|---|---|
-> | 我们先 `start()`（旧 v1） | `["Initialize"]` | `[]` | ✗ 应用收不到启动握手 → 卡启动界面 |
-> | 我们不 start、应用后 start（v4） | `["Initialize"]` | `["Initialize"]` | ✓ 双方都正常 |
+> | 我们先 `start()` | `["Initialize"]` | `[]` | ✗ 卡启动界面 |
+> | 只监听、不 start | `["Initialize"]` | `["Initialize"]` | ✓ 双方正常 |
 >
-> MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"；v1 是普通 script
-> （早于 `type=module` 的应用主包）就先 start，把服务端的 `Initialize` 消费掉了。
-> **注意：不能用 Node 验证此语义**——Node 的 MessagePort 在 `addEventListener` 时会隐式
-> start，导致"不 start"在 Node 里也失败，从而得出错误结论（曾据此误判为不可行）。
+> **注意：不可用 Node 验证此语义** —— Node 的 MessagePort 在 `addEventListener` 时隐式
+> start，会让"不 start"也失败，从而误判为"方案不可行"（曾据此绕过一圈）。
 >
-> **备选：`--tps-dom-only` → `zcode-tps-v2.js`（纯 DOM，零端口接触）**
-> 只读 `data-testid=v4-model-config` 的 `data-usage-used`，显示上下文用量，
-> **没有精确 tok/s / 首 token / out**。适合作为 v4 万一异常时的保守回退。
+> **已知特性**：tok/s 在开始生成后约 1~4 秒才出现（滑动窗口需 ≥2 个采样点，且思考阶段
+> 无文本增量），期间只显示 `●` 与时间，属预期；out（本轮累计输出）到达后立即显示。
 >
-> **已废弃：`zcode-tps.js`（原 v1）** —— 该文件保留仅供 diff 参考，不再被注入。
+> 本脚本源自 [linux.do 2886711](https://linux.do/t/topic/2886711)（lanvv）分享的
+> `zcode-patcher.zip`，本仓库只删除了 `port.start()` 一行并补充自诊断，**计算逻辑与原版一致**。
 > ⚠️ **回滚预案**：改动 asar 前先 `python scripts/restore_clean.py --backup` 存一份干净副本，
 > 若客户端异常，完全退出后 `python scripts/restore_clean.py --latest` 秒级还原，无需重装 ZCode。
 
@@ -252,7 +255,7 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 ```
 
 ```bash
-python zcode_patcher.py --tps-footer             # 注入（默认用本 skill scripts/zcode-tps.js）
+python zcode_patcher.py --tps-footer             # 注入 scripts/zcode-tps.js
 python zcode_patcher.py --tps-footer --check     # 查状态
 python zcode_patcher.py --tps-footer --revert    # 整体还原
 python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定注入源
@@ -300,7 +303,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | console 出现 CSP 拦截报错 | 当前版本 index.html 无 CSP；若未来版本加了，需同步放宽 `script-src` 允许同目录脚本 |
 | 指标一直只有「● 时间」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 out/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
-| 想换脚本逻辑 | 改 zcode-tps.js 后 `--tps-footer --revert && --tps-footer` 重打（幂等） |
+| 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
 
 ## 五、模型拉取按钮：设置页一键拉取/勾选模型
 
