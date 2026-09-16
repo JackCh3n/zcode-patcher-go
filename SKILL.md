@@ -215,25 +215,30 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 
 ## 四、打开状态栏：TPS 统计胶囊
 
-> **两条实现路线（按 ZCode 版本选择）**
+> **实现路线**
 >
-> - **v3（默认，`zcode-tps-v2.js`）——读 ZCode 自己渲染的真实 token，零端口**
->   主数据源：**模型调用轨迹**面板每行摘要的元数据节点（由 ZCode 的 `VNt()` 渲染）：
->   `<span data-trajectory-call-metadata>IN 1,234· OUT 5,678· 1.2s· 12:34</span>`
->   其 usage 来自 `record.response.usage`（真实 inputTokens/outputTokens）+ `durationMs`。
->   轨迹在工作期间默认展开（`HMt(): {expanded:!0}`），故生成中即可读到实时值。
->   显示 `● out 18k · 3.4s · 45 tok/s`：本轮累计输出（多调用求和）、耗时、速率（OUT 增量/时间）。
->   回退：轨迹不可用时读 `data-testid=v4-model-config` 的 `data-usage-used`（仅上下文用量）。
->   局限：轨迹用虚拟滚动，滚出视口的行会被卸载 → 极端长轮次的早期调用不计入合计。
+> **默认：`zcode-tps-v4.js` —— 事件流方案，但绝不调用 `port.start()`（含真实 tok/s、首 token）**
 >
-> - **v1（`--tps-v1-legacy`）——截取 ServicePort 事件流，仅 ≤3.11.x 可用**
->   ⚠️ 在 **3.12.2+ 会导致客户端卡在启动界面（需重装或 `scripts/restore_clean.py` 回滚）**。
->   原因（Node MessagePort 复现 + 实机验证）：MessagePort 的消息只分发给"分发瞬间已注册的监听器"；
->   v1 是普通 script（早于 `type=module` 应用主包执行）就注册并 `start()`，把服务端的
->   `Initialize` 启动握手消费掉了 —— 应用的协议客户端永远收不到握手，服务层起不来。
->   复现结果：我们收到 `["Initialize","usage.delta"]`，应用只收到 `["usage.delta"]`。
->   ≤3.11.x 之所以没事，是那时启动不依赖该握手（端口只承载渲染后的会话流）。
+> 数据来自 preload 转交的 ServicePort 事件流（`usage.delta` 真实 outputTokens、`stream.chunk`）。
+> 与旧 v1 的唯一差别：**只 `addEventListener`，把 `start()` 留给应用**。
 >
+> 为什么这一行之差是致命的（真实 Chrome / MessageChannel 实测，双方持有同一 port）：
+>
+> | 做法 | 我们收到 | 应用收到 | 结果 |
+> |---|---|---|---|
+> | 我们先 `start()`（旧 v1） | `["Initialize"]` | `[]` | ✗ 应用收不到启动握手 → 卡启动界面 |
+> | 我们不 start、应用后 start（v4） | `["Initialize"]` | `["Initialize"]` | ✓ 双方都正常 |
+>
+> MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"；v1 是普通 script
+> （早于 `type=module` 的应用主包）就先 start，把服务端的 `Initialize` 消费掉了。
+> **注意：不能用 Node 验证此语义**——Node 的 MessagePort 在 `addEventListener` 时会隐式
+> start，导致"不 start"在 Node 里也失败，从而得出错误结论（曾据此误判为不可行）。
+>
+> **备选：`--tps-dom-only` → `zcode-tps-v2.js`（纯 DOM，零端口接触）**
+> 只读 `data-testid=v4-model-config` 的 `data-usage-used`，显示上下文用量，
+> **没有精确 tok/s / 首 token / out**。适合作为 v4 万一异常时的保守回退。
+>
+> **已废弃：`zcode-tps.js`（原 v1）** —— 该文件保留仅供 diff 参考，不再被注入。
 > ⚠️ **回滚预案**：改动 asar 前先 `python scripts/restore_clean.py --backup` 存一份干净副本，
 > 若客户端异常，完全退出后 `python scripts/restore_clean.py --latest` 秒级还原，无需重装 ZCode。
 
