@@ -474,15 +474,44 @@
     port.addEventListener("message", (ev) => handleFrame(ev.data));
     port.start();
     window.__ztpsPort = port;   // 调试用：暴露端口供旁路监听原始帧
+    if (diag) { diag.portHooked = true; diag.portHookedAt = new Date().toISOString(); }
+  }
+  // 端口转交的消息格式跨版本不同，两种都要认：
+  //   旧版（≤3.11.x）：window.postMessage("zcode:service-port", "*", [port])   → data 为字符串
+  //   新版（3.12.2+）：window.postMessage({type:"zcode:service-port",...}, "*", [port]) → data 为对象
+  // 只比较字符串会让新版端口永远不被接管（表现为 turnStats 恒为 0、胶囊不显示）。
+  function takePortIfHandoff(d) {
+    if (!d) return false;
+    if (d === "zcode:service-port") return true;
+    if (typeof d === "object" && d.type) {
+      return d.type === "zcode:service-port" || d.type === "zcode:scoped-service-port";
+    }
+    return false;
   }
   window.addEventListener("message", (e) => {
     if (e.source !== window) return;
-    const d = e.data;
-    if (d === "zcode:service-port" || (d && d.type === "zcode:scoped-service-port")) {
+    if (diag) {
+      diag.lastMessage = typeof e.data === "string" ? e.data
+        : (e.data && e.data.type) || Object.prototype.toString.call(e.data);
+      diag.lastMessagePorts = (e.ports || []).length;
+    }
+    if (takePortIfHandoff(e.data)) {
       if (e.ports && e.ports[0]) hookPort(e.ports[0]);
     }
   }, true);
 
   window.__ztpsTurns = turns;
   window.__ztpsHook = hookPort;   // 调试用：热注入时可对存量端口手动补挂
+  // 自检：加载 5s 后若仍未接管端口，把诊断信息打到 console（便于版本升级后排障）
+  setTimeout(() => {
+    if (diag) {
+      diag.portInjectedAt = diag.portInjectedAt || null;
+      diag.diagReady = true;
+      if (!diag.portHooked) {
+        console.warn("[zcode-tps] 未接管到服务端口，统计将不可用。window.__ztpsDiag =", diag);
+      } else {
+        console.info("[zcode-tps] 已接管端口，window.__ztpsDiag =", diag);
+      }
+    }
+  }, 5000);
 })();
