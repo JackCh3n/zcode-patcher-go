@@ -210,17 +210,109 @@
   const hasActivity = (t) => t.streaming || t.textTok > 0 || t.outputTokens > 0;
 
   // ---------- 渲染 ①: 输入框工具栏中央（当前会话最近一轮） ----------
-  function findToolbarRow() {
-    const ta = document.querySelector("[data-testid='v4-composer-input']");
-    if (!ta) return null;
-    const card = ta.closest("form") ? ta.closest("form").parentElement : ta.parentElement;
-    if (!card) return null;
-    for (const el of card.querySelectorAll("div")) {
-      const c = el.className || "";
-      if (/flex[^"]*items-end/.test(c) && (el.textContent || "").includes("完全访问")) return el;
+  // 工具栏行的定位策略（按稳定性排序，逐级回退；不依赖任何随版本/语言变化的文案）：
+  //   a) composer 容器内带 items-end 的 flex 行，且含交互控件（button/select/combobox）
+  //   b) composer 容器内最后一个 items-end 的 flex 行
+  // 历史：旧实现用 textContent.includes("完全访问") 判定，3.12.2 起该文案改为按 i18n key
+  // 动态渲染，DOM 文本不再稳定命中 → 改为结构特征判定。
+  // 诊断：window.__ztpsDiag 暴露每一环的探测结果（选择器命中数/候选行数/最终选择），
+  // 版本升级后若工具栏消失，先在 console 看该对象定位失败环节。
+  const COMPOSER_INPUT_SELECTORS = [
+    "[data-testid='v4-composer-input']",
+    "[data-testid*='composer-input']",
+    "textarea[data-testid]",
+    "form textarea",
+    "textarea",
+  ];
+
+  function findComposerInput() {
+    const tried = [];
+    for (const sel of COMPOSER_INPUT_SELECTORS) {
+      let hit = null;
+      try {
+        const els = Array.from(document.querySelectorAll(sel));
+        if (els.length) {
+          // 多个匹配时取可见且最靠近视口底部的（composer 在底部）
+          const vis = els.filter((e) => e.offsetParent != null);
+          hit = (vis.length ? vis : els).sort(
+            (a, b) => b.getBoundingClientRect().top - a.getBoundingClientRect().top
+          )[0];
+        }
+      } catch (err) { /* 选择器不合法，跳过 */ }
+      tried.push({ selector: sel, count: hit ? 1 : 0 });
+      if (hit) return { el: hit, tried };
     }
-    return null;
+    return { el: null, tried };
   }
+
+  function findToolbarRow() {
+    const { el: ta, tried } = findComposerInput();
+    if (diag) {
+      diag.inputTried = tried;
+      diag.inputFound = !!ta;
+    }
+    if (!ta) return null;
+
+    // 从某元素向上找「工具栏行」：class 同时含 flex 与 items-end 的 div，且不得越过 card
+    const rowFrom = (el, card) => {
+      let cur = el;
+      while (cur && cur !== card.parentElement) {
+        if (cur.tagName === "DIV") {
+          const c = typeof cur.className === "string" ? cur.className : "";
+          if (/(^|\s)flex(\s|$)/.test(c) && /items-end/.test(c)) return cur;
+        }
+        cur = cur.parentElement;
+      }
+      return null;
+    };
+
+    // ① 首选：发送按钮向上找工具栏行。
+    //    发送按钮（v4-composer-send）恒在工具栏内，且不会与输入框的 testid 混淆——
+    //    注意不能用 ta.closest("[data-testid*='composer']")：输入框自身 testid 为
+    //    v4-composer-input 也含 "composer"，closest 从自身起匹配会返回输入框本身，
+    //    导致在输入框内部找工具栏行而落空（3.12.2 实测踩到）。
+    let card = null;
+    try { card = ta.closest("[data-testid='v4-composer']"); } catch (err) { /* ignore */ }
+    if (!card) card = ta.closest("form") ? ta.closest("form").parentElement : null;
+    if (!card) card = ta.parentElement;
+    if (!card) return null;
+
+    let picked = null;
+    try {
+      const sendBtn = document.querySelector("[data-testid='v4-composer-send']");
+      if (sendBtn && card.contains(sendBtn)) picked = rowFrom(sendBtn, card);
+    } catch (err) { /* ignore */ }
+
+    // ② 回退：card 内所有 items-end 行，取含交互控件的那一行（或最后一个）
+    if (!picked) {
+      const rows = Array.from(card.querySelectorAll("div")).filter((el) => {
+        const c = typeof el.className === "string" ? el.className : "";
+        return /(^|\s)flex(\s|$)/.test(c) && /items-end/.test(c);
+      });
+      if (diag) diag.rowCandidates = rows.length;
+      if (!rows.length) return null;
+      picked = rows.find((el) => el.querySelector("button,select,[role='combobox'],input")) ||
+               rows[rows.length - 1];
+    } else if (diag) {
+      diag.rowCandidates = 1;
+      diag.rowVia = "send-button";
+    }
+
+    if (diag) {
+      diag.pickedRowText = (picked.textContent || "").slice(0, 60);
+      diag.pickedRowClass = String(picked.className || "").slice(0, 120);
+      diag.cardTag = card.tagName;
+    }
+    return picked;
+  }
+
+  // 诊断对象（console 里直接看 window.__ztpsDiag）
+  let diag = null;
+  try {
+    diag = window.__ztpsDiag = window.__ztpsDiag || {};
+    diag.scriptVersion = "3.12-fix";
+    diag.loadedAt = new Date().toISOString();
+  } catch (err) { /* ignore */ }
 
   function renderBar() {
     try {
@@ -250,12 +342,28 @@
         if (!latest || (t.startedAt ?? 0) > (latest.startedAt ?? 0)) latest = t;
       }
       let host = row.querySelector(":scope > [data-ztps-bar]");
+      if (diag) {
+        diag.domSessionId = domSess;
+        diag.visibleTurns = visible.size;
+        diag.turnStats = turns.size;
+        diag.latestFound = !!latest;
+        if (latest) {
+          diag.latest = {
+            msgId: latest.msgId, sessionId: latest.sessionId,
+            startedAt: latest.startedAt, endedAt: latest.endedAt,
+            streaming: latest.streaming, out: latest.outputTokens, textTok: latest.textTok,
+          };
+        }
+        diag.hostAttached = !!host;
+      }
       // 无可见轮次 → 不展示；轮次无时间戳但仍在生成/有内容 → 显示（省略时间段）；完全无数据防假时钟。
       // 仅在 host 已存在时移除，绝不走「先创建再删除」，否则 MutationObserver 会自激
       if (!latest || (!hasActivity(latest) && latest.endedAt == null && latest.startedAt == null)) {
+        if (diag) diag.hiddenReason = !latest ? "无可见轮次" : "轮次无时间戳且无活动";
         if (host) host.remove();
         return;
       }
+      if (diag) diag.hiddenReason = null;
       if (!host) {
         host = document.createElement("div");
         host.setAttribute("data-ztps-bar", "1");

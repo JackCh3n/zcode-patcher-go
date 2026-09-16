@@ -1012,17 +1012,27 @@ def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path
         print(f"[+] {asar}\n    已移除 TPS 注入（新大小 {new_size:,} 字节，备份已清理）")
         return
 
-    if installed:
-        print(f"[=] {asar}\n    已打 TPS 注入，跳过")
-        return
-    if idx_bytes.count(b"</body>") != 1:
-        print(f"[!] {asar}\n    index.html 的 </body> 出现 {idx_bytes.count(b'</body>')} 次（期望 1），拒绝盲改")
-        return
     if tps_src is None:
         tps_src = Path(__file__).resolve().parent / "zcode-tps.js"
     if not tps_src.is_file():
         raise SystemExit(f"[!] 找不到注入源脚本 {tps_src}（可用 --tps-src 指定路径）")
     script_bytes = tps_src.read_bytes()
+
+    # 脚本热更新：已注入但内容与源不一致时替换脚本条目（无需先 revert）。
+    # 只按"脚本条目是否存在"判断会让改动后的脚本永不生效（版本适配修复无法落地）。
+    if installed:
+        cur_script = _asar_entry_bytes(raw, data_start, paths[TPS_SCRIPT_PATH]) if TPS_SCRIPT_PATH in paths else None
+        if cur_script == script_bytes:
+            print(f"[=] {asar}\n    已打 TPS 注入（脚本同源），跳过")
+            return
+        new_size = _repack_asar(asar, {TPS_SCRIPT_PATH: script_bytes}, set())
+        _refresh_chart_sidecar(asar)
+        print(f"[+] {asar}\n    TPS 脚本已热更新（{tps_src.name} {len(script_bytes):,} 字节，其余组件不变）")
+        return
+
+    if idx_bytes.count(b"</body>") != 1:
+        print(f"[!] {asar}\n    index.html 的 </body> 出现 {idx_bytes.count(b'</body>')} 次（期望 1），拒绝盲改")
+        return
 
     if not bak.is_file():
         shutil.copyfile(asar, bak)
