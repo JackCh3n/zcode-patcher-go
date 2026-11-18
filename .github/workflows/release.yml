@@ -12,6 +12,10 @@ permissions:
   contents: write
   packages: write
 
+defaults:
+  run:
+    shell: bash   # Windows runner 上同样用 bash（默认 pwsh，cp/mkdir -p 会失败）
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/zcode-patcher
@@ -78,12 +82,11 @@ jobs:
           else
             CHANGED=false
           fi
-          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          TAGS="$IMG:latest"
+          if [ "$CHANGED" = "true" ]; then TAGS="$TAGS;$IMG:$VERSION"; fi
           {
-            echo "tags<<EOF"
-            echo "$IMG:latest"
-            if [ "$CHANGED" = "true" ]; then echo "$IMG:$VERSION"; fi
-            echo "EOF"
+            echo "changed=$CHANGED"
+            echo "tags=$TAGS"
           } >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
