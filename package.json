@@ -1,6 +1,6 @@
 {
   "name": "zcode-patcher",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ZCode 桌面客户端本地增强补丁集（Go 单二进制，零运行时依赖）：思考档位透传、用量页去截断、TPS 状态胶囊、模型弹窗加宽、模型拉取按钮",
   "private": true
 }

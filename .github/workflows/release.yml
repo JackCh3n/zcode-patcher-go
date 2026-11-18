@@ -50,11 +50,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p out
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/zcode-patcher${{ matrix.ext }} ./cmd
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w"             -o out/zcode-patcher-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/zcode-patcher${{ matrix.ext }}
+          path: out/zcode-patcher-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
           if-no-files-found: error
 
   # ---------- Docker 镜像（linux/amd64；含双实现脚本与文档）----------
@@ -71,29 +71,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - name: Derive version tags
-        id: tags
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          IMG="ghcr.io/${{ env.IMAGE_NAME }}"
-          LATEST_TAG=$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || true)
-          if [ -z "$LATEST_TAG" ] || [ "${LATEST_TAG#v}" != "$VERSION" ]; then
-            CHANGED=true
-          else
-            CHANGED=false
-          fi
-          TAGS="$IMG:latest"
-          if [ "$CHANGED" = "true" ]; then TAGS="$TAGS;$IMG:$VERSION"; fi
-          {
-            echo "changed=$CHANGED"
-            echo "tags=$TAGS"
-          } >> "$GITHUB_OUTPUT"
+      - name: Read version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}/zcode-patcher
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+            type=raw,value=${{ steps.ver.outputs.version }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
