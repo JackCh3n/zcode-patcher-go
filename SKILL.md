@@ -52,7 +52,7 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 | Linux | `/opt/ZCode`、`/usr/share/ZCode` 之类 | 探测 /opt、/usr/share |
 
 - 关键文件相对安装根目录固定：`resources/glm/zcode.cjs`（内核）、`resources/app.asar`（桌面端资源包）
-- Python ≥ 3.10，用系统可用的 `python3`/`python` 即可，脚本仅用标准库
+- **目标机零依赖**：主工具是 Go 编译的单个静态二进制（约 8MB，六平台各一份）——Go 直接产出原生可执行文件，目标机无需安装 Go 或任何运行时（弃用 Python 的根本原因：Python 打包体积大，且仍需解释器环境）
 - Program Files / /Applications 类目录可能需要管理员/sudo 权限
 - 执行 AI 可按上述规则自行定位安装（如 `ls /Applications`、查运行中进程的 exe 路径）
 
@@ -321,7 +321,7 @@ zcode-patcher model-puller revert    # 整体还原
 - **锚点跨版本设计**：preload/main 锚点用语义字符串（`exposeInMainWorld("zcode",{`、`SaveMcpToUserDirectory`——后者是 IPC 通道名，非压缩符号），正则捕获周边的压缩别名（electron 导入别名 / ipcMain 包装别名）拼进注入代码——**无需按版本维护符号表**；命中数 ≠1 一律拒绝
 - **保存语义（重要）**：整份 config 读出 → 只对不存在的模型 `p.models[mid] = {模板}` → 整份写回。**已有条目原样保留**（手改的 reasoning.variants 安全，比 ZCode 自带设置页保存还会剥 variants 更安全）
 - **新供应商一步到位**：保存时按 baseURL（去尾斜杠）匹配供应商，匹配不到再按界面名称兜底，仍匹配不到则**自动创建** provider 条目（UUID id、source:custom、表单里的 baseURL/apiKey），创建后 toast 提示——破解 ZCode 自带流程的死锁（「添加供应商」按钮要求先有 ≥1 个模型，而手填模型 id 正是痛点）。`kind`（API 协议）判定优先读表单「API 格式」下拉的显示文案（3.11.2 实测三选项：`Anthropic Messages (/v1/messages)` → anthropic、`Chat Completions (/chat/completions)` → openai-compatible、`Responses (/responses)` → openai），读不到再按 URL 特征（含 anthropic → anthropic，`/v1` 结尾 → openai-compatible）→ 现有自定义供应商的 kind → openai-compatible。猜错表现为请求协议不对，设置页改 API 格式保存即可
-- **新模型模板（元数据感知）**：拉取时读取 `/v1/models` 透出的每模型元数据——`context_length`/`max_input_tokens` → `limit.context`、`max_output_tokens`/`max_completion_tokens` → `limit.output`、`supported_efforts` → `reasoning.variants`（自动前插 off 档）、`default_effort` → `defaultVariant`（workbuddy2api 等网关透出这些字段）；元数据缺失时退回保守模板 `limit 1M/128k + off/high/max`。`zcode.modified: true` 恒有——与 CLI `model_pull.py` 一致
+- **新模型模板（元数据感知）**：拉取时读取 `/v1/models` 透出的每模型元数据——`context_length`/`max_input_tokens` → `limit.context`、`max_output_tokens`/`max_completion_tokens` → `limit.output`、`supported_efforts` → `reasoning.variants`（自动前插 off 档）、`default_effort` → `defaultVariant`（workbuddy2api 等网关透出这些字段）；元数据缺失时退回保守模板 `limit 1M/128k + off/high/max`。`zcode.modified: true` 恒有——与 CLI `model-pull` 行为一致
 - **还原全外科手术式**：index.html 只摘自己的 tag、preload/main 用正则精确摘除自己注入的字节段（别名通配），**不依赖 sidecar 指纹**——其他补丁重打包改了 asar 大小也能精确还原；TPS 的还原同样已改为外科手术式，两个重打包级补丁任意顺序装/卸互不误伤
 - **组件级热更新**：`--check`/注入以「内容比对」判定每个组件是否为现行版本（不能只看 marker——换实现后 marker 不变会漏更新）；不一致的组件自动重注入，一致的原样跳过；注入段形态不符（被手工改过）时拒绝改写并提示
 - **备份**：首次注入整包备份 `app.asar.puller.bak` + sidecar `app.asar.puller-patch.json`；与 TPS/chart 的 sidecar 联动同现有机制（重打包后自动同步 chart sidecar 的 offset/指纹）
@@ -343,7 +343,7 @@ zcode-patcher model-pull --test https://api.example.com/v1 [KEY]
 |---|---|
 | 设置页没有按钮 | `--model-puller --check` 看四组件哪个缺；渲染 console 查 `window.__ZCODE_MODEL_PULLER_LOADED_PRO__` |
 | 按钮报「通信桥不可用」 | preload 桥缺失（`window.zcode.readConfigFile` 应为函数）；重跑注入会逐组件补齐 |
-| 拉取失败 | 供应商 baseURL 不通或鉴权失败；先用 `model_pull.py --test <URL> [KEY]` 单测 |
+| 拉取失败 | 供应商 baseURL 不通或鉴权失败；先用 `zcode-patcher model-pull --test <URL> [KEY]` 单测 |
 | 自动创建的供应商协议不对（请求报错/无响应） | kind 猜错（如 OpenAI 兼容端点被判成 anthropic）：设置页打开该供应商，把 API 格式改对保存即可 |
 | 想换注入脚本逻辑 | 改 `scripts/zcode-model-puller.js` 或改 preload/main 注入构造器后重跑 `--model-puller` 即可——**四组件（renderer/preload/main/index）均按内容比对**，只更新与现行实现不一致的组件，无需 revert；`--check` 会显示「含旧版组件，重跑可自动更新」 |
 | 保存后档位丢失 | 正常不会（整读整写不重建条目）；若用 ZCode 自带设置页保存过该 provider，属其重建路径剥掉 variants，重配 reasoning 即可 |
