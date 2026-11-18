@@ -9,14 +9,14 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 | 能力 | 说法 | 命令 | 改哪里 |
 |---|---|---|---|
-| 思考等级透传 | 给自定义模型配思考等级 | `python zcode_patcher.py [--check/--revert/--extract]` | 内核 zcode.cjs（原地改写，.bak 备份） |
-| 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
-| 打开状态栏 | 输入框工具栏状态胶囊（**v2 纯 DOM 观测，3.12.2+ 安全**） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
-| 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py --model-width [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
-| 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
+| 思考等级透传 | 给自定义模型配思考等级 | `zcode-patcher kernel check|install|revert` | 内核 zcode.cjs（原地改写，.bak 备份） |
+| 打开统计图 | 用量页趋势图/饼图去截断 | `zcode-patcher usage-chart check|install|revert` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
+| 打开状态栏 | 输入框工具栏状态胶囊（**v2 纯 DOM 观测，3.12.2+ 安全**） | `zcode-patcher tps check|install|revert` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `zcode-patcher model-width check|install|revert` | app.asar 内主 bundle（同长度原地改字节） |
+| 模型拉取按钮 | 设置页一键拉取/勾选模型 | `zcode-patcher model-puller check|install|revert` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
-两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --model-width --tps-footer --model-puller`。
-另有命令行版拉模型（不动 asar，直接同步 config.json）：`python scripts/model_pull.py --all [--dry-run]`。
+全部一次打：`zcode-patcher install`（顺序：原地补丁先于重打包补丁，避免指纹错位）。
+另有命令行版拉模型（不动 asar，直接同步 config.json）：`zcode-patcher model-pull --all [--dry-run]`。
 
 ## 标准执行流程（AI 代执行与人工自助通用）
 
@@ -24,9 +24,9 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 
 1. **定位安装**：脚本自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows/macOS/Linux，见「跨平台约定」）；探测不到就把安装根目录作为位置参数传入。
 2. **只读核实**（能否生效的判断，全部只读，可放心先跑）：
-   - `python zcode_patcher.py --check`：思考等级补丁状态；ZCode 版本不在「已知符号表」时跑 `--extract`——能提取出锚点即可生效，提取失败说明内核结构变了，按「新版本锚点提取」人工分析后再动。
-   - `python zcode_patcher.py --usage-chart --check`：两个截断表达式是否命中。
-   - `python zcode_patcher.py --tps-footer --check`：index.html 是否找到、注入状态。
+   - `zcode-patcher kernel check`：思考等级补丁状态；版本不在已知锚点表时如实报「拒绝盲改」——按「新版本锚点提取」人工定位后把新锚点补进源码内核表重新编译。
+   - `zcode-patcher usage-chart check`：两个截断表达式是否命中。
+   - `zcode-patcher tps check`：index.html 是否找到、注入状态。
    - 脚本对「表达式出现次数 ≠1」「锚点不唯一」等情况一律拒绝盲改并报告原因——报告即结论，不要绕过。
 3. **确认备份就绪并展示还原命令**（打补丁前必须完成，AI 代执行时明确提示用户保存还原命令）：
    - 思考等级：首次打补丁自动生成 `zcode.cjs.bak`（整文件备份）
@@ -35,9 +35,9 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 4. **展示执行命令与还原命令**——**单功能单命令，按用户点名的功能给对应命令，不要捆绑其他功能**（各补丁相互独立；低风险的思考等级/统计图 AI 可在核实与备份确认后直接代执行，重打包级的状态栏交由用户执行）。以「打开状态栏」为例：
    ```bash
    # 执行
-   python "<skill目录>/scripts/zcode_patcher.py" --tps-footer
+   ./zcode-patcher tps install
    # 还原（万一异常，保存备用；完全退出 ZCode 后执行，还原后重启 ZCode）
-   python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --revert
+   ./zcode-patcher tps revert
    ```
    人工自助时用户自行执行；AI 代执行时经用户确认后由 AI 运行，或用户复制命令自己跑。
 5. **重启验证**：完全退出并重启 ZCode（Windows 运行中锁 app.asar，打补丁前必须退出）后，按各功能的「验证」说明确认。
@@ -61,11 +61,11 @@ description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁
 ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍：
 
 ```bash
-python zcode_patcher.py --check            # 思考等级补丁状态
-python zcode_patcher.py --usage-chart --check
-python zcode_patcher.py --model-width --check
-python zcode_patcher.py --tps-footer --check
-python zcode_patcher.py --model-puller --check
+zcode-patcher kernel check           # 思考等级补丁状态
+zcode-patcher usage-chart check
+zcode-patcher model-width check
+zcode-patcher tps check
+zcode-patcher model-puller check
 ```
 
 失配的按「自助使用流程」重打；思考等级补丁在新内核上先 `--extract` 确认锚点可提取。
@@ -178,9 +178,9 @@ openai 系: reasoning_effort:"档名"
 | 模型用量饼图 | 模型 >6 个时只画 Top 5，其余合并为「其他模型」（`i=n.length>Q,a=i?Q-1:Q`，Q=6） | 改为 `i=!1,a=1/0` 全量出块、无合并 |
 
 ```bash
-python zcode_patcher.py --usage-chart            # 打补丁（asar 内同长度字节级原地覆盖）
-python zcode_patcher.py --usage-chart --check    # 查状态
-python zcode_patcher.py --usage-chart --revert   # 从 sidecar 还原全部原始字节
+zcode-patcher usage-chart install   # 打补丁（asar 内同长度字节级原地覆盖）
+zcode-patcher usage-chart check    # 查状态
+zcode-patcher usage-chart revert   # 从 sidecar 还原全部原始字节
 ```
 
 - 原理：解析 asar 头定位渲染文件偏移，替换截断表达式后用空格补齐到原字节长度原地写回——asar 头、offset、unpacked 结构零改动，无需重打包
@@ -195,9 +195,9 @@ python zcode_patcher.py --usage-chart --revert   # 从 sidecar 还原全部原�
 模型选择浮窗（点工具栏模型名弹出的那个，含「先选渠道、再选模型」的二级子菜单）默认宽 `w-48` = **192px**，长模型名（如 `cn:deepseek-v4.1-flash`、带前缀的供应商模型）会被 `truncate` 截断，只能靠 hover 的 `title` 看全。本补丁把它加宽到 `w-80` = **320px**。
 
 ```bash
-python zcode_patcher.py --model-width            # 打补丁（同长度字节级原地覆盖）
-python zcode_patcher.py --model-width --check    # 查状态
-python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
+zcode-patcher model-width install   # 打补丁（同长度字节级原地覆盖）
+zcode-patcher model-width check    # 查状态
+zcode-patcher model-width revert   # 从 sidecar 还原
 ```
 
 两处补丁点（都在渲染层主 bundle，如 `out/renderer/assets/styles-*.js`）：
@@ -242,8 +242,8 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 >
 > 本脚本源自 [linux.do 2886711](https://linux.do/t/topic/2886711)（lanvv）分享的
 > `zcode-patcher.zip`，本仓库只删除了 `port.start()` 一行并补充自诊断，**计算逻辑与原版一致**。
-> ⚠️ **回滚预案**：改动 asar 前先 `python scripts/restore_clean.py --backup` 存一份干净副本，
-> 若客户端异常，完全退出后 `python scripts/restore_clean.py --latest` 秒级还原，无需重装 ZCode。
+> ⚠️ **回滚预案**：改动 asar 前先 `zcode-patcher restore --backup` 存一份干净副本，
+> 若客户端异常，完全退出后 `zcode-patcher restore --latest` 秒级还原，无需重装 ZCode。
 
 > 本能力与思考等级补丁源自 [linux.do 帖子 2886711](https://linux.do/t/topic/2886711)（作者 lanvv）分享的 `zcode-patcher.zip`（原帖授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
@@ -255,10 +255,10 @@ python zcode_patcher.py --model-width --revert   # 从 sidecar 还原
 ```
 
 ```bash
-python zcode_patcher.py --tps-footer             # 注入 scripts/zcode-tps.js
-python zcode_patcher.py --tps-footer --check     # 查状态
-python zcode_patcher.py --tps-footer --revert    # 整体还原
-python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定注入源
+zcode-patcher tps install             # 注入内嵌 zcode-tps.js（go:embed，改 scripts/zcode-tps.js 后重新编译换版）
+zcode-patcher tps check     # 查状态
+zcode-patcher tps revert            # 整体还原
+# 注：Go 版无 --tps-src；内嵌脚本改动=改 scripts/zcode-tps.js 后 go build 重编
 ```
 
 ### 行为规则（验收标准）
@@ -310,10 +310,10 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 设置 → 模型供应商页注入「⚡️ 自动拉取模型」按钮：点开弹窗自动拉取该供应商 `/models` 接口的模型列表，标注「已添加/新模型」并勾选，保存后经**原生 IPC** 读写 `~/.zcode/v2/config.json` 并自动刷新界面——不用退出 ZCode、不用手改 config。
 
 ```bash
-python zcode_patcher.py --model-puller             # 注入（默认用本 skill scripts/zcode-model-puller.js）
-python zcode_patcher.py --model-puller --check     # 查状态（逐组件：renderer/挂载/preload/main）
-python zcode_patcher.py --model-puller --revert    # 整体还原
-python zcode_patcher.py --model-puller --puller-src /path/to/zcode-model-puller.js
+zcode-patcher model-puller install   # 注入（内嵌 scripts/zcode-model-puller.js，go:embed）
+zcode-patcher model-puller check     # 查状态（逐组件：renderer/挂载/preload/main）
+zcode-patcher model-puller revert    # 整体还原
+# 注：Go 版无 --puller-src；脚本改动=改 scripts/zcode-model-puller.js 后 go build 重编
 ```
 
 - **来源**：前端脚本 vendored from [HHQ-666/zcode-model-puller](https://github.com/HHQ-666/zcode-model-puller)（MIT）；原项目的 npx @electron/asar 全量解包/重打包方案未采纳（Node 依赖 + 会把 12 个 unpacked 原生模块打进 asar 内部，Electron 无法从 asar 加载 .node），改用本 skill 自带的纯 Python `_repack_asar`（unpacked 条目原样跳过、原子替换、回读校验），路径走 `discover()` 跨平台探测（原项目仅支持 macOS）
@@ -329,10 +329,10 @@ python zcode_patcher.py --model-puller --puller-src /path/to/zcode-model-puller.
 ### 命令行版（不动 asar）
 
 ```bash
-python scripts/model_pull.py                 # 交互选供应商
-python scripts/model_pull.py --all           # 同步全部自定义供应商
-python scripts/model_pull.py --provider 关键字 [--dry-run] [--refresh] [--no-reasoning]
-python scripts/model_pull.py --test https://api.example.com/v1 [KEY]
+zcode-patcher model-pull             # 交互选供应商
+zcode-patcher model-pull --all       # 同步全部自定义供应商
+zcode-patcher model-pull --provider 关键字 [--dry-run] [--refresh] [--no-reasoning]
+zcode-patcher model-pull --test https://api.example.com/v1 [KEY]
 ```
 
 新模型默认**元数据感知**：网关透出 `context_length/max_output_tokens/supported_efforts/default_effort` 时按模型写实 limit 与思考档位，缺失退回 `1M/128k + off/high/max` 模板（`--no-reasoning` 关闭）。已有条目默认原样保留；**`--refresh` 按服务器元数据刷新已有条目的 limit 与思考档位**（其余键不动，手改过的条目也只动这两处）。注意 CLI 在 ZCode 运行中写 config 有被回写覆盖的竞态，建议退出后跑；注入版无此问题。

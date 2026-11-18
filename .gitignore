@@ -1,16 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
+# Go 构建产物
+*.exe
+/go-build*
 
-# 补丁运行时产物（备份 / 逐字节记录 / 临时文件）——这些只属于本机，禁止入库
+# 补丁运行时产物（备份 / 逐字节记录 / 临时文件）——只属于本机，禁止入库
 *.bak
+*.cjs.bak
 *.tps.bak
 *.puller.bak
-*.original.bak
 *-patch.json
 *.chart-patch.json
+*.width-patch.json
 *.tps-patch.json
 *.puller-patch.json
 *.tps-tmp

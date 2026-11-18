@@ -1,0 +1,135 @@
+# 每推送到 main：从 package.json 读版本号；版本变化（对比已有 tag）则自动打
+# git tag（vX.Y.Z）、发 GitHub Release 并上传三平台二进制制品，同时推版本化 +
+# latest Docker 镜像到 GHCR；版本未变则只做验证构建与镜像刷新。
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/zcode-patcher
+
+jobs:
+  # ---------- 三平台二进制 ----------
+  build-bins:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, goos: windows, goarch: amd64, ext: ".exe" }
+          - { os: windows-latest, goos: windows, goarch: arm64, ext: ".exe" }
+          - { os: ubuntu-latest,   goos: linux,   goarch: amd64, ext: "" }
+          - { os: ubuntu-latest,   goos: linux,   goarch: arm64, ext: "" }
+          - { os: macos-latest,    goos: darwin,  goarch: amd64, ext: "" }
+          - { os: macos-latest,    goos: darwin,  goarch: arm64, ext: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Sync embedded scripts
+        run: |
+          cp scripts/zcode-tps.js cmd/embed/
+          cp scripts/zcode-model-puller.js cmd/embed/
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p out
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/zcode-patcher${{ matrix.ext }} ./cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/zcode-patcher${{ matrix.ext }}
+          if-no-files-found: error
+
+  # ---------- Docker 镜像（linux/amd64；含双实现脚本与文档）----------
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Derive version tags
+        id: tags
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          IMG="ghcr.io/${{ env.IMAGE_NAME }}"
+          LATEST_TAG=$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || true)
+          if [ -z "$LATEST_TAG" ] || [ "${LATEST_TAG#v}" != "$VERSION" ]; then
+            CHANGED=true
+          else
+            CHANGED=false
+          fi
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$IMG:latest"
+            if [ "$CHANGED" = "true" ]; then echo "$IMG:$VERSION"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------- 发布 Release（仅当版本变化）----------
+  release:
+    needs: [build-bins]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version change?
+        id: chk
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          LATEST_TAG=$(git describe --tags --match 'v*.*.*' --abbrev=0 2>/dev/null || true)
+          if [ -z "$LATEST_TAG" ] || [ "${LATEST_TAG#v}" != "$VERSION" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download all binaries
+        if: steps.chk.outputs.changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Tag & create release
+        if: steps.chk.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          VERSION=${{ steps.chk.outputs.version }}
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" \
+            dist/* \
+            --generate-notes \
+            --title "v${VERSION}"

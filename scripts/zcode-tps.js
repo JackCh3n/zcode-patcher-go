@@ -47,7 +47,7 @@
       startedAt: null, endedAt: null, activeMs: null,
       firstChunkAt: null, rowFirstAt: null, lastUsageAt: null,
       outputTokens: 0, inputTokens: 0, cacheReadTokens: 0, totalTokens: 0,
-      textTok: 0, win: [], modelId: null, streaming: false,
+      textTok: 0, win: [], samples: [], modelId: null, streaming: false, lastActAt: null,
     });
     return turns.get(id);
   };
@@ -57,7 +57,7 @@
     t.endedAt = null; t.activeMs = null;
     t.firstChunkAt = null; t.rowFirstAt = null; t.lastUsageAt = null;
     t.outputTokens = 0; t.inputTokens = 0; t.cacheReadTokens = 0; t.totalTokens = 0;
-    t.textTok = 0; t.win = []; t.lastTps = null; t.streaming = true;
+    t.textTok = 0; t.win = []; t.samples = []; t.lastTps = null; t.streaming = true;
   }
 
   // token 粗估：CJK 字符 1 字 ≈ 1 token，其余 4 字符 ≈ 1 token
@@ -73,11 +73,20 @@
     while (t.win.length > 2 && t.win[0][0] < floor) t.win.shift();
   };
 
+  // 本轮速度采样（供 max/avg/min）：1s 内的重复采样原地覆盖，封顶 600 条（约 10 分钟）
+  const pushSamp = (t, ts, v) => {
+    const s = t.samples;
+    if (s.length && ts - s[s.length - 1][0] < 900) { s[s.length - 1][1] = v; return; }
+    s.push([ts, v]);
+    if (s.length > 600) s.shift();
+  };
+
   function onRow(row) {
     if (!row) return;
     if (row.op === "row.delta") { onRowDelta(row); return; }
     if (!row.turnId) return;
     const t = get(row.turnId);
+    t.lastActAt = Date.now();   // 活跃心跳：用于多会话下识别"后台已结束但收不到结束事件"的轮
     if (row.rowId != null) rowTurn.set(row.rowId, row.turnId);
     if (row.kind === "turnHeader") {
       if ((t.endedAt != null || t.lastUsageAt != null) && row.startedAt && row.startedAt !== t.startedAt) resetTurnStats(t);
@@ -108,6 +117,7 @@
     if (!turnId) return;
     const t = turns.get(turnId);
     if (!t) return;
+    t.lastActAt = Date.now();
     t.textTok += estTok(row.append);
     pushWin(t, Date.now(), t.textTok);
   }
@@ -119,6 +129,7 @@
       if (!scid) return;
       const t = findByScid(scid) || turns.get(scidTurn.get(scid));
       if (!t) return;
+      t.lastActAt = Date.now();
       t.outputTokens += ev.outputTokens || 0;
       t.inputTokens += ev.inputTokens || 0;
       t.cacheReadTokens += ev.cacheReadTokens || 0;
@@ -140,6 +151,7 @@
       if (!t && scid && scidTurn.has(scid)) t = turns.get(scidTurn.get(scid));
       if (!t) return;
       if (t.firstChunkAt == null) t.firstChunkAt = firstChunkByScid[scid];
+      t.lastActAt = ev.occurredAt || Date.now();
       t.sessionId = ev.sessionId || t.sessionId;
       t.streaming = true;   // turnHeader 未到时也标记生成中
       pushWin(t, ev.occurredAt || Date.now(), t.textTok);   // 心跳采样，保证窗口时间轴连续
@@ -195,31 +207,50 @@
   };
 
   function statsOf(t) {
+    const now = Date.now();
+    // 静默判定：streaming 但超过 STALE_MS 无任何事件（chunk/usage/行），
+    // 视为该轮实际已结束（多会话下后台完成的轮收不到结束行事件，原版会永远
+    // 保持最近速度=看起来卡死）。改为：绿点转灰、速度按已到达的真实用量取终值。
+    const STALE_MS = 30000;
+    const lastAct = Math.max(t.lastActAt ?? 0, t.win.length ? t.win[t.win.length - 1][0] : 0);
+    const stale = !!(t.streaming && lastAct && now - lastAct > STALE_MS);
+    const effStreaming = t.streaming && !stale;
     const firstAt = t.firstChunkAt ?? t.rowFirstAt ?? null;
     const ttft = firstAt != null && t.startedAt != null ? firstAt - t.startedAt : null;
     let out = t.outputTokens;
     if (out === 0 && t.textTok > 0) out = t.textTok;   // 中止/失败未报 usage：以内容估算兜底
     let tps = null;
-    if (t.streaming) {
+    if (effStreaming) {
       out = Math.max(out, t.textTok);   // 流式中 usage 未到，用内容估算补齐（精确值到达后自然切换）
-      const now = Date.now();
       const win = t.win.filter((w) => now - w[0] <= 4000);
       if (win.length >= 2) {
         const dt = (win[win.length - 1][0] - win[0][0]) / 1000;
         const dtok = win[win.length - 1][1] - win[0][1];
         if (dt >= 1 && dtok > 0) tps = dtok / dt;
       }
+      if (tps != null) pushSamp(t, now, tps);
       if (tps == null && t.lastTps != null) tps = t.lastTps;   // 工具执行等静默期：保持最近速度
     } else {
       const decodeFrom = firstAt ?? t.startedAt;
       const decodeMs = decodeFrom != null && t.lastUsageAt != null ? t.lastUsageAt - decodeFrom : null;
       tps = t.outputTokens > 0 && decodeMs > 500 ? t.outputTokens / (decodeMs / 1000) : null;
-      if (tps == null && t.lastTps != null) tps = t.lastTps;
+      // lastTps 兜底只给"正常结束但 usage 缺失"的轮；stale（疑似后台结束/卡死）不回退，
+      // 否则又是永远冻结的旧速度
+      if (tps == null && t.lastTps != null && !stale) tps = t.lastTps;
+      if (tps != null) pushSamp(t, now, tps);
     }
     if (tps != null) t.lastTps = tps;
+    let tmax = null, tavg = null, tmin = null;
+    if (t.samples.length) {
+      const vs = t.samples.map((x) => x[1]);
+      tmax = Math.max(...vs);
+      tmin = Math.min(...vs);
+      tavg = vs.reduce((a, b) => a + b, 0) / vs.length;
+    }
     return {
       stamp: fmtStamp(t.endedAt || t.startedAt), ttft, tps, out,
-      streaming: t.streaming,
+      tmax, tavg, tmin,
+      streaming: effStreaming,
     };
   }
 
@@ -326,7 +357,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.12-fix";
+    diag.scriptVersion = "3.14-stalefix2";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -403,7 +434,7 @@
       row.style.alignItems = "center";
       const s = statsOf(latest);
       // 内容签名：未变化时只做溢出复查（零 DOM 写），避免 MutationObserver 自激
-      const key = [s.stamp, s.ttft, s.tps, s.out, s.streaming].join("|");
+      const key = [s.stamp, s.ttft, s.tmax, s.tavg, s.tmin, s.tps, s.out, s.streaming].join("|");
       let segs = host._zsegs;
       if (host._zkey !== key) {
         host._zkey = key;
@@ -425,12 +456,15 @@
         dot.style.color = "#4ade80";
         if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
         host.appendChild(dot);
-        // 定位：原生右下角已展示上下文水位，此处只放本轮性能指标
+        // 定位：● 时间 · 首 3.7s · max · avg · min · now · out（速度单位 tok/s 省略）
         segs = [];
         if (s.stamp != null) segs.push({ p: 0, nodes: [span(s.stamp)] });
-        if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
-        if (s.tps != null) segs.push({ p: 2, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
-        if (s.out > 0) segs.push({ p: 3, nodes: [span("out "), span(fmtTok(s.out), "VALUE")] });
+        if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, nodes: [span("首 "), span(fmtLat(s.ttft), "VALUE")] });
+        if (s.tmax != null) segs.push({ p: 2, nodes: [span("max "), span(fmtTps(s.tmax), "VALUE")] });
+        if (s.tavg != null) segs.push({ p: 3, nodes: [span("avg "), span(fmtTps(s.tavg), "VALUE")] });
+        if (s.tmin != null) segs.push({ p: 4, nodes: [span("min "), span(fmtTps(s.tmin), "VALUE")] });
+        if (s.tps != null) segs.push({ p: 5, nodes: [span("now "), span(fmtTps(s.tps), "ACCENT")] });
+        if (s.out > 0) segs.push({ p: 6, nodes: [span("out "), span(fmtTok(s.out), "VALUE")] });
         segs.forEach((g, i) => {
           if (i > 0) {
             const sep = span("·");
@@ -441,9 +475,9 @@
         segs.forEach((g) => g.nodes.forEach((n) => host.appendChild(n)));
         host._zsegs = segs;
       }
-      // 渐进降级：溢出时按优先级丢段（out → tok/s）；窗口尺寸变化时也复查
+      // 渐进降级：溢出时按优先级丢段（min → avg → max → out）；窗口尺寸变化时也复查
       try {
-        for (const drop of [3, 2]) {
+        for (const drop of [4, 3, 2, 6]) {
           if (host.scrollWidth <= host.clientWidth + 1) break;
           const g = segs.find((x) => x.p === drop);
           if (!g) continue;
